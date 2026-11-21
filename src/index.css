@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+:root {
+  --teal: #4d8a96;
+  --teal-d: #3d7280;
+  --teal-l: #e7eff1;
+  --teal-pale: #f2f7f8;
+  --ink: #12262e;
+  --mut: #5d737a;
+  --line: #e3ebec;
+  --bg: #ffffff;
+  --ok: #2e8a5c;
+  --ok-bg: #eef7f1;
+  --radius: 20px;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+  }
+
+  body {
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid var(--teal);
+    outline-offset: 2px;
+  }
+}
+
+.fc-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Marquee animation */
+@keyframes mq {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.fc-marquee-track {
+  display: flex;
+  gap: 12px;
+  width: max-content;
+  animation: mq 32s linear infinite;
+}
+
+.fc-marquee-track:hover {
+  animation-play-state: paused;
+}
+
+/* Typing caret */
+@keyframes fc-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.fc-caret {
+  display: inline-block;
+  width: 2.5px;
+  height: 1.05em;
+  background: var(--teal);
+  vertical-align: -2px;
+  margin-left: 2px;
+  animation: fc-blink 0.8s steps(2) infinite;
+}
+
+/* Message pop */
+@keyframes fc-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.fc-pop {
+  animation: fc-pop 0.25s ease;
+}
+
+/* Typing dots */
+@keyframes fc-ty {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-4px);
+  }
+}
+
+.fc-typing-dot {
+  animation: fc-ty 1s infinite;
+}
+
+.fc-typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.fc-typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* Before/After Slider */
+.fc-ba-after {
+  clip-path: inset(0 0 0 var(--pos, 85%));
+}
+
+.fc-ba-handle {
+  left: var(--pos, 85%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .fc-marquee-track,
+  .fc-caret,
+  .fc-pop,
+  .fc-typing-dot {
+    animation: none;
+  }
+}

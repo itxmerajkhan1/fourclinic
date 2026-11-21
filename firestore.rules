@@ -1,0 +1,600 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Pillar 0: Global default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== GLOBAL HELPERS ====================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function isBootstrapAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'itxmerajkhan3109@gmail.com';
+    }
+
+    function hasUserDoc() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function userActive() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true;
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin() || (isVerifiedUser() && hasUserDoc() && userActive() && userRole() == 'admin');
+    }
+
+    function isReceptionist() {
+      return isVerifiedUser() && hasUserDoc() && userActive() && userRole() == 'receptionist';
+    }
+
+    function isDoctor() {
+      return isVerifiedUser() && hasUserDoc() && userActive() && userRole() == 'doctor';
+    }
+
+    function isDoctorFor(doctorId) {
+      return isDoctor() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.doctorId == doctorId;
+    }
+
+    function isStaff() {
+      return isAdmin() || isReceptionist() || isDoctor();
+    }
+
+    function isValidDateStr(s) {
+      return s is string && s.size() == 10 && s.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isValidTimeStr(s) {
+      return s is string && s.size() == 5 && s.matches('^\\d{2}:\\d{2}$');
+    }
+
+    // ==================== VALIDATION BLUEPRINTS ====================
+    function isValidUser(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoUrl', 'role', 'doctorId', 'active', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500))
+        && data.role in ['patient', 'doctor', 'receptionist', 'admin']
+        && (!('doctorId' in data) || (data.doctorId is string && data.doctorId.size() <= 64 && data.doctorId.matches('^[a-zA-Z0-9_\\-]*$')))
+        && data.active is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDoctor(data, doctorId) {
+      return data.keys().hasAll([
+          'id', 'name', 'role', 'specialty', 'bio', 'experience', 'languages',
+          'color', 'photoUrl', 'initials', 'active', 'workingHours', 'blockedDates',
+          'isSample', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'role', 'specialty', 'bio', 'experience', 'languages',
+          'color', 'photoUrl', 'initials', 'active', 'workingHours', 'blockedDates',
+          'isSample', 'createdAt', 'updatedAt'
+        ])
+        && data.id == doctorId && isValidId(data.id)
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
+        && data.role is string && data.role.size() >= 2 && data.role.size() <= 60
+        && data.specialty is string && data.specialty.size() >= 2 && data.specialty.size() <= 80
+        && data.bio is string && data.bio.size() >= 5 && data.bio.size() <= 500
+        && data.experience is string && data.experience.size() >= 2 && data.experience.size() <= 40
+        && data.languages is string && data.languages.size() >= 2 && data.languages.size() <= 80
+        && data.color is string && data.color.size() >= 4 && data.color.size() <= 16 && data.color.matches('^#[0-9a-fA-F]{3,8}$')
+        && data.photoUrl is string && data.photoUrl.size() >= 1 && data.photoUrl.size() <= 300
+        && data.initials is string && data.initials.size() >= 1 && data.initials.size() <= 4
+        && data.active is bool
+        && data.workingHours is map && data.workingHours.size() <= 7
+        && data.blockedDates is list && data.blockedDates.size() <= 60
+        && (data.blockedDates.size() == 0 || isValidDateStr(data.blockedDates[0]))
+        && data.isSample is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidService(data, serviceId) {
+      return data.keys().hasAll([
+          'id', 'name', 'description', 'includes', 'durationMins', 'priceLabel',
+          'basePrice', 'iconKey', 'defaultDoctorId', 'active', 'sortOrder',
+          'isSample', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'description', 'includes', 'durationMins', 'priceLabel',
+          'basePrice', 'iconKey', 'defaultDoctorId', 'active', 'sortOrder',
+          'isSample', 'createdAt', 'updatedAt'
+        ])
+        && data.id == serviceId && isValidId(data.id)
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
+        && data.description is string && data.description.size() >= 5 && data.description.size() <= 400
+        && data.includes is string && data.includes.size() >= 2 && data.includes.size() <= 160
+        && data.durationMins is int && data.durationMins >= 15 && data.durationMins <= 240
+        && data.priceLabel is string && data.priceLabel.size() >= 1 && data.priceLabel.size() <= 40
+        && data.basePrice is number && data.basePrice >= 0 && data.basePrice <= 50000
+        && data.iconKey is string && data.iconKey.size() >= 1 && data.iconKey.size() <= 40
+        && isValidId(data.defaultDoctorId)
+        && data.active is bool
+        && data.sortOrder is int && data.sortOrder >= 0 && data.sortOrder <= 1000
+        && data.isSample is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSchedule(data, scheduleId) {
+      return data.keys().hasAll([
+          'id', 'doctorId', 'date', 'isBlockedDay', 'blockedSlots',
+          'reason', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'doctorId', 'date', 'isBlockedDay', 'blockedSlots',
+          'reason', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.id == scheduleId && isValidId(data.id)
+        && isValidId(data.doctorId)
+        && isValidDateStr(data.date)
+        && data.isBlockedDay is bool
+        && data.blockedSlots is list && data.blockedSlots.size() <= 24
+        && (data.blockedSlots.size() == 0 || isValidTimeStr(data.blockedSlots[0]))
+        && data.reason is string && data.reason.size() <= 160
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function expectedLockId(doctorId, date, time) {
+      return doctorId + '_' + date + '_' + time[0:2] + time[3:5];
+    }
+
+    function isValidSlotLock(data, lockId) {
+      return data.keys().hasAll(['doctorId', 'date', 'time', 'appointmentId', 'bookedByUid', 'createdAt'])
+        && data.keys().hasOnly(['doctorId', 'date', 'time', 'appointmentId', 'bookedByUid', 'createdAt'])
+        && isValidId(lockId)
+        && isValidId(data.doctorId)
+        && isValidDateStr(data.date)
+        && isValidTimeStr(data.time)
+        && lockId == expectedLockId(data.doctorId, data.date, data.time)
+        && isValidId(data.appointmentId)
+        && isValidId(data.bookedByUid)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAppointment(data, apptId) {
+      return data.keys().hasAll([
+          'id', 'referenceCode', 'patientUid', 'patientName', 'patientPhone',
+          'serviceId', 'serviceName', 'doctorId', 'doctorName',
+          'date', 'time', 'durationMins', 'estimatedValue', 'status',
+          'source', 'notes', 'staffNotes', 'slotLockId', 'slotLockIds', 'isSample',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'referenceCode', 'patientUid', 'patientName', 'patientPhone', 'patientEmail',
+          'serviceId', 'serviceName', 'doctorId', 'doctorName',
+          'date', 'time', 'durationMins', 'estimatedValue', 'status',
+          'source', 'notes', 'staffNotes', 'slotLockId', 'slotLockIds', 'isSample',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id == apptId && isValidId(data.id)
+        && data.referenceCode is string && data.referenceCode.size() >= 4 && data.referenceCode.size() <= 20
+        && isValidId(data.patientUid)
+        && data.patientName is string && data.patientName.size() >= 2 && data.patientName.size() <= 80
+        && data.patientPhone is string && data.patientPhone.size() >= 7 && data.patientPhone.size() <= 24
+        && (!('patientEmail' in data) || (data.patientEmail is string && data.patientEmail.size() <= 160))
+        && isValidId(data.serviceId)
+        && data.serviceName is string && data.serviceName.size() >= 2 && data.serviceName.size() <= 80
+        && isValidId(data.doctorId)
+        && data.doctorName is string && data.doctorName.size() >= 2 && data.doctorName.size() <= 80
+        && isValidDateStr(data.date)
+        && isValidTimeStr(data.time)
+        && data.durationMins is int && data.durationMins >= 15 && data.durationMins <= 240
+        && data.estimatedValue is number && data.estimatedValue >= 0 && data.estimatedValue <= 50000
+        && data.status in ['pending', 'confirmed', 'completed', 'cancelled', 'no_show']
+        && data.source in ['form', 'chatbot', 'whatsapp', 'phone', 'walkin', 'staff']
+        && data.notes is string && data.notes.size() <= 400
+        && data.staffNotes is string && data.staffNotes.size() <= 400
+        && isValidId(data.slotLockId)
+        && data.slotLockId == expectedLockId(data.doctorId, data.date, data.time)
+        && data.slotLockIds is list && data.slotLockIds.size() >= 1 && data.slotLockIds.size() <= 16
+        && data.slotLockIds[0] == data.slotLockId
+        && data.isSample is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPatient(data, patientId) {
+      return data.keys().hasAll(['id', 'fullName', 'phone', 'totalAppointments', 'notes', 'isSample', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'uid', 'fullName', 'phone', 'email', 'preferredDoctorId', 'lastVisitDate', 'totalAppointments', 'notes', 'isSample', 'createdAt', 'updatedAt'])
+        && data.id == patientId && isValidId(data.id)
+        && (!('uid' in data) || (data.uid is string && data.uid.size() <= 128))
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 80
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24
+        && (!('email' in data) || (data.email is string && data.email.size() <= 160))
+        && (!('preferredDoctorId' in data) || (data.preferredDoctorId is string && data.preferredDoctorId.size() <= 64))
+        && (!('lastVisitDate' in data) || (data.lastVisitDate is string && data.lastVisitDate.size() <= 10))
+        && data.totalAppointments is int && data.totalAppointments >= 0 && data.totalAppointments <= 10000
+        && data.notes is string && data.notes.size() <= 300
+        && data.isSample is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInquiry(data, inquiryId) {
+      return data.keys().hasAll([
+          'id', 'patientUid', 'channel', 'name', 'contact', 'topic',
+          'status', 'priority', 'estimatedValue', 'internalNotes',
+          'unread', 'messages', 'isSample', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'patientUid', 'channel', 'name', 'contact', 'topic',
+          'status', 'priority', 'assignedToUid', 'assignedToName',
+          'estimatedValue', 'internalNotes', 'unread', 'messages',
+          'isSample', 'createdAt', 'updatedAt'
+        ])
+        && data.id == inquiryId && isValidId(data.id)
+        && isValidId(data.patientUid)
+        && data.channel in ['website', 'chatbot', 'whatsapp', 'phone']
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
+        && data.contact is string && data.contact.size() >= 5 && data.contact.size() <= 120
+        && data.topic is string && data.topic.size() >= 2 && data.topic.size() <= 40
+        && data.status in ['new', 'contacted', 'follow_up', 'closed']
+        && data.priority in ['normal', 'urgent']
+        && (!('assignedToUid' in data) || (data.assignedToUid is string && data.assignedToUid.size() <= 128))
+        && (!('assignedToName' in data) || (data.assignedToName is string && data.assignedToName.size() <= 80))
+        && data.estimatedValue is number && data.estimatedValue >= 0 && data.estimatedValue <= 50000
+        && data.internalNotes is string && data.internalNotes.size() <= 500
+        && data.unread is bool
+        && data.messages is list && data.messages.size() >= 1 && data.messages.size() <= 50
+        && data.messages[0] is map
+        && data.isSample is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidClinicSettings(data, settingId) {
+      return data.keys().hasAll([
+          'id', 'clinicName', 'address', 'phone', 'email',
+          'slotDurationMins', 'minLeadTimeMins', 'maxBookingDaysAhead',
+          'workingHours', 'holidays', 'allowChatbotBooking', 'requireConfirmation', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'clinicName', 'address', 'phone', 'email',
+          'slotDurationMins', 'minLeadTimeMins', 'maxBookingDaysAhead',
+          'workingHours', 'holidays', 'allowChatbotBooking', 'requireConfirmation',
+          'updatedByUid', 'updatedAt'
+        ])
+        && data.id == settingId && isValidId(data.id)
+        && data.clinicName is string && data.clinicName.size() >= 2 && data.clinicName.size() <= 80
+        && data.address is string && data.address.size() >= 5 && data.address.size() <= 200
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 30
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 120
+        && data.slotDurationMins in [15, 30, 45, 60]
+        && data.minLeadTimeMins is int && data.minLeadTimeMins >= 0 && data.minLeadTimeMins <= 1440
+        && data.maxBookingDaysAhead is int && data.maxBookingDaysAhead >= 7 && data.maxBookingDaysAhead <= 180
+        && data.workingHours is map && data.workingHours.size() <= 7
+        && data.holidays is list && data.holidays.size() <= 50
+        && (data.holidays.size() == 0 || data.holidays[0] is map)
+        && data.allowChatbotBooking is bool
+        && data.requireConfirmation is bool
+        && (!('updatedByUid' in data) || (data.updatedByUid is string && data.updatedByUid.size() <= 128))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data, logId) {
+      return data.keys().hasAll(['id', 'actorUid', 'actorEmail', 'actorRole', 'action', 'targetCollection', 'targetId', 'summary', 'createdAt'])
+        && data.keys().hasOnly(['id', 'actorUid', 'actorEmail', 'actorRole', 'action', 'targetCollection', 'targetId', 'summary', 'createdAt'])
+        && data.id == logId && isValidId(data.id)
+        && isValidId(data.actorUid)
+        && data.actorEmail is string && data.actorEmail.size() >= 3 && data.actorEmail.size() <= 160
+        && data.actorRole in ['admin', 'receptionist', 'doctor']
+        && data.action is string && data.action.size() >= 3 && data.action.size() <= 80
+        && data.targetCollection is string && data.targetCollection.size() >= 2 && data.targetCollection.size() <= 40
+        && isValidId(data.targetId)
+        && data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 300
+        && data.createdAt is timestamp;
+    }
+
+    // ==================== COLLECTION RULES ====================
+
+    // Connection test doc
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // Users & RBAC Roles (Strict PII isolation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin() || isReceptionist());
+      allow list: if isAdmin() || isReceptionist();
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUser(incoming(), userId)
+        && incoming().email == request.auth.token.email
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().active == true
+        && (
+          incoming().role == 'patient'
+          || (isBootstrapAdmin() && incoming().role == 'admin')
+        );
+      allow update: if isValidId(userId)
+        && isValidUser(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'doctorId', 'active', 'displayName', 'updatedAt']))
+          || (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    // Public Clinic Doctors Catalog (no personal PII)
+    match /doctors/{doctorId} {
+      allow get: if isValidId(doctorId);
+      allow list: if true;
+      allow create: if isValidId(doctorId)
+        && isAdmin()
+        && isValidDoctor(incoming(), doctorId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(doctorId)
+        && isValidDoctor(incoming(), doctorId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isDoctorFor(doctorId) && incoming().diff(existing()).affectedKeys().hasOnly(['workingHours', 'blockedDates', 'updatedAt']))
+        );
+      allow delete: if isValidId(doctorId) && isAdmin();
+    }
+
+    // Public Services & Pricing Catalog
+    match /services/{serviceId} {
+      allow get: if isValidId(serviceId);
+      allow list: if true;
+      allow create: if isValidId(serviceId)
+        && isAdmin()
+        && isValidService(incoming(), serviceId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(serviceId)
+        && isAdmin()
+        && isValidService(incoming(), serviceId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(serviceId) && isAdmin();
+    }
+
+    // Doctor Schedules & Blocked Leave Overrides (non-PII availability)
+    match /schedules/{scheduleId} {
+      allow get: if isValidId(scheduleId);
+      allow list: if true;
+      allow create: if isValidId(scheduleId)
+        && isValidSchedule(incoming(), scheduleId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isAdmin() || isReceptionist() || isDoctorFor(incoming().doctorId))
+        && exists(/databases/$(database)/documents/doctors/$(incoming().doctorId));
+      allow update: if isValidId(scheduleId)
+        && isValidSchedule(incoming(), scheduleId)
+        && incoming().id == existing().id
+        && incoming().doctorId == existing().doctorId
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || isReceptionist() || isDoctorFor(existing().doctorId));
+      allow delete: if isValidId(scheduleId)
+        && (isAdmin() || isReceptionist() || isDoctorFor(existing().doctorId));
+    }
+
+    // Atomic Non-PII Slot Locks (prevents overlapping doctor bookings)
+    match /slotLocks/{lockId} {
+      allow get: if isValidId(lockId);
+      allow list: if true;
+      allow create: if isValidId(lockId)
+        && isVerifiedUser()
+        && isValidSlotLock(incoming(), lockId)
+        && incoming().bookedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && !exists(/databases/$(database)/documents/slotLocks/$(lockId))
+        && existsAfter(/databases/$(database)/documents/appointments/$(incoming().appointmentId));
+      allow update: if false;
+      allow delete: if isValidId(lockId)
+        && isVerifiedUser()
+        && (isAdmin() || isReceptionist() || isDoctorFor(existing().doctorId) || existing().bookedByUid == request.auth.uid);
+    }
+
+    // Appointments (Strict PII + Ownership + Role Checks)
+    match /appointments/{appointmentId} {
+      allow get: if isValidId(appointmentId)
+        && isVerifiedUser()
+        && (
+          existing().patientUid == request.auth.uid
+          || isAdmin()
+          || isReceptionist()
+          || isDoctorFor(existing().doctorId)
+        );
+      allow list: if isVerifiedUser() && (
+        isAdmin()
+        || isReceptionist()
+        || (isDoctor() && resource.data.doctorId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.doctorId)
+        || resource.data.patientUid == request.auth.uid
+      );
+      allow create: if isValidId(appointmentId)
+        && isVerifiedUser()
+        && isValidAppointment(incoming(), appointmentId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/doctors/$(incoming().doctorId))
+        && exists(/databases/$(database)/documents/services/$(incoming().serviceId))
+        && (
+          (
+            incoming().status in ['pending', 'confirmed']
+            && existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockId))
+            && (incoming().slotLockIds.size() < 2 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[1])))
+            && (incoming().slotLockIds.size() < 3 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[2])))
+            && (incoming().slotLockIds.size() < 4 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[3])))
+          )
+          || (isAdmin() && incoming().isSample == true && incoming().status == 'completed')
+        )
+        && (
+          (incoming().patientUid == request.auth.uid && incoming().status == 'pending' && incoming().staffNotes == '' && incoming().isSample == false)
+          || ((isAdmin() || isReceptionist()) && incoming().status in ['pending', 'confirmed', 'completed'])
+        );
+      allow update: if isValidId(appointmentId)
+        && isVerifiedUser()
+        && isValidAppointment(incoming(), appointmentId)
+        && incoming().id == existing().id
+        && incoming().referenceCode == existing().referenceCode
+        && incoming().patientUid == existing().patientUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          !(incoming().status in ['pending', 'confirmed'])
+          || (
+            existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockId))
+            && (incoming().slotLockIds.size() < 2 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[1])))
+            && (incoming().slotLockIds.size() < 3 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[2])))
+            && (incoming().slotLockIds.size() < 4 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[3])))
+          )
+        )
+        && (
+          // Admin or Receptionist: confirm, reschedule, complete, cancel, no_show, notes
+          (
+            (isAdmin() || isReceptionist())
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'doctorId', 'doctorName', 'serviceId', 'serviceName', 'durationMins', 'estimatedValue', 'staffNotes', 'slotLockId', 'slotLockIds', 'updatedAt'])
+          )
+          // Doctor: only own assigned appointments, transition confirmed -> completed | no_show or update staffNotes
+          || (
+            isDoctorFor(existing().doctorId)
+            && existing().status == 'confirmed'
+            && incoming().status in ['confirmed', 'completed', 'no_show']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'staffNotes', 'updatedAt'])
+          )
+          // Owning Patient: only non-terminal appointments, can cancel or reschedule (resets to pending)
+          || (
+            existing().patientUid == request.auth.uid
+            && existing().status in ['pending', 'confirmed']
+            && (
+              (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+              || (incoming().status == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'slotLockId', 'slotLockIds', 'updatedAt']))
+            )
+          )
+        );
+      allow delete: if isValidId(appointmentId) && isAdmin();
+    }
+
+    // Minimal Authorized Patient Directory (Staff-only reads)
+    match /patients/{patientId} {
+      allow get: if isValidId(patientId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(patientId)
+        && isVerifiedUser()
+        && isValidPatient(incoming(), patientId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() || isReceptionist())
+          || (patientId == request.auth.uid && incoming().uid == request.auth.uid && incoming().isSample == false)
+        );
+      allow update: if isValidId(patientId)
+        && isVerifiedUser()
+        && isValidPatient(incoming(), patientId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() || isReceptionist())
+          || (patientId == request.auth.uid && existing().uid == request.auth.uid && incoming().uid == existing().uid && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'email', 'preferredDoctorId', 'totalAppointments', 'updatedAt']))
+        );
+      allow delete: if isValidId(patientId) && isAdmin();
+    }
+
+    // Inquiries & CRM Pipeline
+    match /inquiries/{inquiryId} {
+      allow get: if isValidId(inquiryId)
+        && isVerifiedUser()
+        && (isAdmin() || isReceptionist() || existing().patientUid == request.auth.uid);
+      allow list: if isVerifiedUser()
+        && (isAdmin() || isReceptionist() || resource.data.patientUid == request.auth.uid);
+      allow create: if isValidId(inquiryId)
+        && isVerifiedUser()
+        && isValidInquiry(incoming(), inquiryId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (incoming().patientUid == request.auth.uid && incoming().status == 'new' && incoming().internalNotes == '' && incoming().isSample == false)
+          || (isAdmin() || isReceptionist())
+        );
+      allow update: if isValidId(inquiryId)
+        && (isAdmin() || isReceptionist())
+        && isValidInquiry(incoming(), inquiryId)
+        && incoming().id == existing().id
+        && incoming().patientUid == existing().patientUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(inquiryId) && isAdmin();
+    }
+
+    // Clinic Settings
+    match /clinicSettings/{settingId} {
+      allow get: if isValidId(settingId);
+      allow list: if true;
+      allow create: if isValidId(settingId)
+        && isAdmin()
+        && isValidClinicSettings(incoming(), settingId)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId)
+        && isAdmin()
+        && isValidClinicSettings(incoming(), settingId)
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Immutable Staff Audit Logs
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && (isAdmin() || isReceptionist());
+      allow list: if isAdmin() || isReceptionist();
+      allow create: if isValidId(logId)
+        && isStaff()
+        && isValidAuditLog(incoming(), logId)
+        && incoming().actorUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

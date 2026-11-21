@@ -1,0 +1,8 @@
+{
+  "name": "FourClinic",
+  "description": "FourClinic AI-Powered Dental Clinic Management System with Firebase Authentication, Cloud Firestore, real-time appointment slot transactions, and role-based clinic dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

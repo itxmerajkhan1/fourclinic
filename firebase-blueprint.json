@@ -1,0 +1,255 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated user account and RBAC role assignment.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 160 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "photoUrl": { "type": "string", "maxLength": 500 },
+        "role": { "type": "string", "enum": ["patient", "doctor", "receptionist", "admin"] },
+        "doctorId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]*$" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "active", "createdAt", "updatedAt"]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Public clinic practitioner profile, specialty, working hours, and leave dates.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "role": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "specialty": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "bio": { "type": "string", "minLength": 5, "maxLength": 500 },
+        "experience": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "languages": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "color": { "type": "string", "minLength": 4, "maxLength": 16, "pattern": "^#[0-9a-fA-F]{3,8}$" },
+        "photoUrl": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "initials": { "type": "string", "minLength": 1, "maxLength": 4 },
+        "active": { "type": "boolean" },
+        "workingHours": { "type": "object" },
+        "blockedDates": { "type": "array" },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "role", "specialty", "bio", "experience", "languages", "color", "photoUrl", "initials", "active", "workingHours", "blockedDates", "isSample", "createdAt", "updatedAt"]
+    },
+    "Service": {
+      "title": "Service",
+      "description": "Dental clinic service catalog item with duration and transparent price.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 5, "maxLength": 400 },
+        "includes": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "durationMins": { "type": "integer" },
+        "priceLabel": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "basePrice": { "type": "number" },
+        "iconKey": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "defaultDoctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "active": { "type": "boolean" },
+        "sortOrder": { "type": "integer" },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "description", "includes", "durationMins", "priceLabel", "basePrice", "iconKey", "defaultDoctorId", "active", "sortOrder", "isSample", "createdAt", "updatedAt"]
+    },
+    "Schedule": {
+      "title": "Schedule",
+      "description": "Date-specific doctor leave or blocked time slot overrides.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "doctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "isBlockedDay": { "type": "boolean" },
+        "blockedSlots": { "type": "array" },
+        "reason": { "type": "string", "maxLength": 160 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "doctorId", "date", "isBlockedDay", "blockedSlots", "reason", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "SlotLock": {
+      "title": "SlotLock",
+      "description": "Non-PII atomic reservation lock preventing double-bookings per doctor, date, and time.",
+      "type": "object",
+      "properties": {
+        "doctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$", "maxLength": 5 },
+        "appointmentId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["doctorId", "date", "time", "appointmentId", "bookedByUid", "createdAt"]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Patient dental appointment request and lifecycle record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referenceCode": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "patientUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "patientName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "patientPhone": { "type": "string", "minLength": 7, "maxLength": 24 },
+        "patientEmail": { "type": "string", "maxLength": 160 },
+        "serviceId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "serviceName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "doctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "doctorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$", "maxLength": 5 },
+        "durationMins": { "type": "integer" },
+        "estimatedValue": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "completed", "cancelled", "no_show"] },
+        "source": { "type": "string", "enum": ["form", "chatbot", "whatsapp", "phone", "walkin", "staff"] },
+        "notes": { "type": "string", "maxLength": 400 },
+        "staffNotes": { "type": "string", "maxLength": 400 },
+        "slotLockId": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "slotLockIds": { "type": "array" },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "referenceCode", "patientUid", "patientName", "patientPhone", "serviceId", "serviceName", "doctorId", "doctorName", "date", "time", "durationMins", "estimatedValue", "status", "source", "notes", "staffNotes", "slotLockId", "slotLockIds", "isSample", "createdAt", "updatedAt"]
+    },
+    "Patient": {
+      "title": "Patient",
+      "description": "Minimal authorized patient directory record for front-desk scheduling.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 24 },
+        "email": { "type": "string", "maxLength": 160 },
+        "preferredDoctorId": { "type": "string", "maxLength": 64 },
+        "lastVisitDate": { "type": "string", "maxLength": 10 },
+        "totalAppointments": { "type": "integer" },
+        "notes": { "type": "string", "maxLength": 300 },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fullName", "phone", "totalAppointments", "notes", "isSample", "createdAt", "updatedAt"]
+    },
+    "Inquiry": {
+      "title": "Inquiry",
+      "description": "Patient contact inquiry or AI assistant escalated lead.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "patientUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "channel": { "type": "string", "enum": ["website", "chatbot", "whatsapp", "phone"] },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "contact": { "type": "string", "minLength": 5, "maxLength": 120 },
+        "topic": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "status": { "type": "string", "enum": ["new", "contacted", "follow_up", "closed"] },
+        "priority": { "type": "string", "enum": ["normal", "urgent"] },
+        "assignedToUid": { "type": "string", "maxLength": 128 },
+        "assignedToName": { "type": "string", "maxLength": 80 },
+        "estimatedValue": { "type": "number" },
+        "internalNotes": { "type": "string", "maxLength": 500 },
+        "unread": { "type": "boolean" },
+        "messages": { "type": "array" },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "patientUid", "channel", "name", "contact", "topic", "status", "priority", "estimatedValue", "internalNotes", "unread", "messages", "isSample", "createdAt", "updatedAt"]
+    },
+    "ClinicSettings": {
+      "title": "ClinicSettings",
+      "description": "Clinic-wide schedule hours, holidays, slot duration, and booking settings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clinicName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "address": { "type": "string", "minLength": 5, "maxLength": 200 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 30 },
+        "email": { "type": "string", "minLength": 5, "maxLength": 120 },
+        "slotDurationMins": { "type": "integer" },
+        "minLeadTimeMins": { "type": "integer" },
+        "maxBookingDaysAhead": { "type": "integer" },
+        "workingHours": { "type": "object" },
+        "holidays": { "type": "array" },
+        "allowChatbotBooking": { "type": "boolean" },
+        "requireConfirmation": { "type": "boolean" },
+        "updatedByUid": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "clinicName", "address", "phone", "email", "slotDurationMins", "minLeadTimeMins", "maxBookingDaysAhead", "workingHours", "holidays", "allowChatbotBooking", "requireConfirmation", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable log of staff administrative actions and status transitions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorEmail": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "actorRole": { "type": "string", "enum": ["admin", "receptionist", "doctor"] },
+        "action": { "type": "string", "minLength": 3, "maxLength": 80 },
+        "targetCollection": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "targetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "summary": { "type": "string", "minLength": 3, "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUid", "actorEmail", "actorRole", "action", "targetCollection", "targetId", "summary", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profile and role metadata. Strictly PII-isolated to owner or verified staff."
+    },
+    "/doctors/{doctorId}": {
+      "schema": { "$ref": "#/entities/Doctor" },
+      "description": "Public practitioner profiles, working hours, and leave dates."
+    },
+    "/services/{serviceId}": {
+      "schema": { "$ref": "#/entities/Service" },
+      "description": "Public dental services and pricing catalog."
+    },
+    "/schedules/{scheduleId}": {
+      "schema": { "$ref": "#/entities/Schedule" },
+      "description": "Doctor leave and blocked time-slot overrides."
+    },
+    "/slotLocks/{lockId}": {
+      "schema": { "$ref": "#/entities/SlotLock" },
+      "description": "Non-PII atomic slot locks preventing duplicate doctor/date/time bookings."
+    },
+    "/appointments/{appointmentId}": {
+      "schema": { "$ref": "#/entities/Appointment" },
+      "description": "Appointment records accessible only to owning patient or authorized staff."
+    },
+    "/patients/{patientId}": {
+      "schema": { "$ref": "#/entities/Patient" },
+      "description": "Authorized staff-only minimal patient contact directory."
+    },
+    "/inquiries/{inquiryId}": {
+      "schema": { "$ref": "#/entities/Inquiry" },
+      "description": "Patient inquiries and CRM pipeline records."
+    },
+    "/clinicSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/ClinicSettings" },
+      "description": "Clinic hours, holidays, and slot duration settings."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable staff audit trail."
+    }
+  }
+}
