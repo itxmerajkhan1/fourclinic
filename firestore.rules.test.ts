@@ -428,6 +428,24 @@ export const SECURITY_RULES_CASES: readonly RulesTestCase[] = [
     path: 'slotLocks/d1_2026-12-01_1000',
     expected: 'PERMISSION_DENIED',
   },
+  {
+    id: 31,
+    category: 'cancellation_and_slot_release',
+    name: 'Booking Owner Deleting Own SlotLock or BusySlot While Appointment Remains Pending/Confirmed Denied',
+    actor: { uid: 'anon_guest_1', sign_in_provider: 'anonymous' },
+    operation: 'delete',
+    path: 'slotLocks/d1_2026-12-01_1000',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 32,
+    category: 'cancellation_and_slot_release',
+    name: 'Staff Deleting SlotLock or BusySlot Independently Without Releasing Active Appointment Denied',
+    actor: { uid: 'recep_1', email: 'recep@fourclinic.test', email_verified: true, roleInDb: 'receptionist' },
+    operation: 'delete',
+    path: 'busySlots/d1_2026-12-01_1000',
+    expected: 'PERMISSION_DENIED',
+  },
 ] as const;
 
 type FirestoreCompat = firebase.firestore.Firestore;
@@ -1369,10 +1387,181 @@ export async function runEmulatorTests(): Promise<void> {
       })
     );
 
-    // Non-owner cannot delete another guest's slotLock
+    // Non-owner cannot delete another guest's slotLock or busySlot
     const lockSnap = await adminDb.collection('slotLocks').doc(`d1_${testDate}_1500`).get();
     assert.equal(lockSnap.exists, true);
     await assertFails(anon1Db.collection('slotLocks').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(anon1Db.collection('busySlots').doc(`d1_${testDate}_1500`).delete());
+
+    // 10. Critical Security Fix: Booking owner AND staff cannot delete slotLocks or busySlots
+    // independently while the associated appointment remains pending or confirmed.
+    await assertFails(anon2Db.collection('slotLocks').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(anon2Db.collection('busySlots').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(recepDb.collection('slotLocks').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(recepDb.collection('busySlots').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(adminDb.collection('slotLocks').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(adminDb.collection('busySlots').doc(`d1_${testDate}_1500`).delete());
+
+    // Owner deleting BOTH slotLocks + busySlots in a batch/tx while leaving appointment pending must FAIL
+    await assertFails(
+      anon2Db.runTransaction(async (tx) => {
+        tx.delete(anon2Db.collection('slotLocks').doc(`d1_${testDate}_1500`));
+        tx.delete(anon2Db.collection('busySlots').doc(`d1_${testDate}_1500`));
+      })
+    );
+
+    // Confirm appointment by receptionist, then verify owner STILL cannot independently delete its locks
+    await assertSucceeds(
+      recepDb.collection('appointments').doc('appt_rebooked_1500').update({
+        status: 'confirmed',
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      })
+    );
+    await assertFails(anon2Db.collection('slotLocks').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(anon2Db.collection('busySlots').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(doctor1Db.collection('slotLocks').doc(`d1_${testDate}_1500`).delete());
+    await assertFails(doctor1Db.collection('busySlots').doc(`d1_${testDate}_1500`).delete());
+
+    // Overlapping booking against the protected 15:00 slot must STILL FAIL
+    await assertFails(
+      performBookingTx(anon1Db, {
+        apptId: 'appt_overlap_1500_blocked',
+        patientUid: 'anon_guest_1',
+        doctorId: 'd1',
+        doctorName: 'Dr. Maya Okafor',
+        serviceId: 'checkup',
+        serviceName: 'Check-up & Consultation',
+        durationMins: 30,
+        estimatedValue: 50,
+        date: testDate,
+        time: '15:00',
+        stepMins: 30,
+        status: 'pending',
+        source: 'form',
+        tokenHash: await sha256Hex('FCV-OVL150-AAAAAA-BBBBBB-CCCCCC'),
+      })
+    );
+
+    // Owner CAN legitimately reschedule a confirmed appointment atomically (resets to pending, swaps locks)
+    const hashRebooked = await sha256Hex('FCV-REBOOK-AAAAAA-BBBBBB-CCCCCC');
+    await assertSucceeds(
+      anon2Db.runTransaction(async (tx) => {
+        const now = firebase.firestore.FieldValue.serverTimestamp();
+        tx.delete(anon2Db.collection('slotLocks').doc(`d1_${testDate}_1500`));
+        tx.delete(anon2Db.collection('busySlots').doc(`d1_${testDate}_1500`));
+        tx.set(anon2Db.collection('slotLocks').doc(`d1_${testDate}_1530`), {
+          doctorId: 'd1',
+          date: testDate,
+          time: '15:30',
+          appointmentId: 'appt_rebooked_1500',
+          bookedByUid: 'anon_guest_2',
+          createdAt: now,
+        });
+        tx.set(anon2Db.collection('busySlots').doc(`d1_${testDate}_1530`), {
+          doctorId: 'd1',
+          date: testDate,
+          time: '15:30',
+          createdAt: now,
+        });
+        tx.update(anon2Db.collection('appointments').doc('appt_rebooked_1500'), {
+          date: testDate,
+          time: '15:30',
+          slotLockId: `d1_${testDate}_1530`,
+          slotLockIds: [`d1_${testDate}_1530`],
+          status: 'pending',
+          updatedAt: now,
+        });
+        tx.update(anon2Db.collection('visitLookups').doc(hashRebooked), {
+          date: testDate,
+          time: '15:30',
+          status: 'pending',
+          updatedAt: now,
+        });
+      })
+    );
+
+    // Owner CAN legitimately cancel the appointment atomically and release slotLocks + busySlots
+    await assertSucceeds(
+      anon2Db.runTransaction(async (tx) => {
+        const now = firebase.firestore.FieldValue.serverTimestamp();
+        tx.update(anon2Db.collection('appointments').doc('appt_rebooked_1500'), {
+          status: 'cancelled',
+          updatedAt: now,
+        });
+        tx.update(anon2Db.collection('visitLookups').doc(hashRebooked), {
+          status: 'cancelled',
+          updatedAt: now,
+        });
+        tx.delete(anon2Db.collection('slotLocks').doc(`d1_${testDate}_1530`));
+        tx.delete(anon2Db.collection('busySlots').doc(`d1_${testDate}_1530`));
+      })
+    );
+
+    // 11. Worst-case 4-slot Receptionist reschedule (4 old locks -> 4 disjoint new locks) must stay
+    // within Firestore's 20-document security-rule lookup limit and release old slots atomically.
+    const old4Locks = [
+      `d4_${secondDate}_1400`,
+      `d4_${secondDate}_1430`,
+      `d4_${secondDate}_1500`,
+      `d4_${secondDate}_1530`,
+    ];
+    const new4Locks = [
+      `d4_${secondDate}_0900`,
+      `d4_${secondDate}_0930`,
+      `d4_${secondDate}_1000`,
+      `d4_${secondDate}_1030`,
+    ];
+    const new4Times = ['09:00', '09:30', '10:00', '10:30'];
+    await assertSucceeds(
+      recepDb.runTransaction(async (tx) => {
+        const now = firebase.firestore.FieldValue.serverTimestamp();
+        old4Locks.forEach((oldId) => {
+          tx.delete(recepDb.collection('slotLocks').doc(oldId));
+          tx.delete(recepDb.collection('busySlots').doc(oldId));
+        });
+        new4Locks.forEach((newId, idx) => {
+          tx.set(recepDb.collection('slotLocks').doc(newId), {
+            doctorId: 'd4',
+            date: secondDate,
+            time: new4Times[idx],
+            appointmentId: 'appt_staff_4slot',
+            bookedByUid: 'recep_1',
+            createdAt: now,
+          });
+          tx.set(recepDb.collection('busySlots').doc(newId), {
+            doctorId: 'd4',
+            date: secondDate,
+            time: new4Times[idx],
+            createdAt: now,
+          });
+        });
+        tx.update(recepDb.collection('appointments').doc('appt_staff_4slot'), {
+          date: secondDate,
+          time: '09:00',
+          slotLockId: new4Locks[0],
+          slotLockIds: new4Locks,
+          status: 'confirmed',
+          updatedAt: now,
+        });
+        tx.update(recepDb.collection('visitLookups').doc(hashStaff), {
+          date: secondDate,
+          time: '09:00',
+          status: 'confirmed',
+          updatedAt: now,
+        });
+        tx.set(recepDb.collection('auditLogs').doc('log_resched_4slot'), {
+          id: 'log_resched_4slot',
+          actorUid: 'recep_1',
+          actorEmail: 'recep@fourclinic.test',
+          actorRole: 'receptionist',
+          action: 'appointment.reschedule',
+          targetCollection: 'appointments',
+          targetId: 'appt_staff_4slot',
+          summary: 'Moved 4-slot appointment to 09:00',
+          createdAt: now,
+        });
+      })
+    );
 
     console.log('ALL_FIRESTORE_EMULATOR_SECURITY_RULES_TESTS_PASSED');
   } finally {

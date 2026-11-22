@@ -250,6 +250,28 @@ service cloud.firestore {
         );
     }
 
+    function isApptReleasingSlotLock(apptAfter, lockId) {
+      return apptAfter != null
+        ? (
+            apptAfter.data.status in ['cancelled', 'no_show', 'completed']
+            || (
+              apptAfter.data.status in ['pending', 'confirmed']
+              && !(lockId in apptAfter.data.slotLockIds)
+            )
+          )
+        : isAdmin();
+    }
+
+    function canDeleteSlotLock(apptAfter, lockId, existingLock) {
+      return (
+          existingLock.bookedByUid == request.auth.uid
+          || isApptDocOwner(apptAfter)
+          || isAdminOrReceptionist()
+          || isDoctorFor(existingLock.doctorId)
+        )
+        && isApptReleasingSlotLock(apptAfter, lockId);
+    }
+
     function visitLookupMatchesCreatedAppt(apptData, lookupData, tokenHash) {
       return apptData.patientUid == lookupData.ownerUid
         && ('guestTokenHash' in apptData)
@@ -685,8 +707,9 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isValidId(lockId)
         && isSignedIn()
+        && !existsAfter(/databases/$(database)/documents/slotLocks/$(lockId))
         && (
-          !existsAfter(/databases/$(database)/documents/slotLocks/$(lockId))
+          exists(/databases/$(database)/documents/slotLocks/$(lockId))
           || isAdminOrReceptionist()
           || isDoctorFor(existing().doctorId)
         );
@@ -716,11 +739,10 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isValidId(lockId)
         && isSignedIn()
-        && (
-          existing().bookedByUid == request.auth.uid
-          || isAdminOrReceptionist()
-          || isDoctorFor(existing().doctorId)
-          || isApptDocOwner(get(/databases/$(database)/documents/appointments/$(existing().appointmentId)))
+        && canDeleteSlotLock(
+          getAfter(/databases/$(database)/documents/appointments/$(existing().appointmentId)),
+          lockId,
+          existing()
         );
     }
 
