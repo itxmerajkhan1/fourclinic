@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   query,
   runTransaction,
@@ -14,20 +15,26 @@ import {
   ALLOWED_STATUS_TRANSITIONS,
   expectedLockId,
   generateAvailableSlotsForDoctor,
+  generateGuestVisitSecret,
   getCoveredLockIds,
   getCoveredTimes,
+  getSlotsNeededForDuration,
+  MAX_SLOT_LOCKS,
   sanitizeId,
+  saveLocalGuestVisitSecret,
+  sha256Hex,
   validateBookingInput,
 } from '../lib/validation';
 import type {
   Appointment,
   AppointmentSource,
   AppointmentStatus,
+  BusySlot,
   ClinicSettings,
   Doctor,
   ScheduleOverride,
   ServiceItem,
-  SlotLock,
+  VisitLookup,
 } from '../types/clinic';
 
 export interface CreateAppointmentInput {
@@ -41,10 +48,15 @@ export interface CreateAppointmentInput {
   notes: string;
   source: AppointmentSource;
   initialStatus?: 'pending' | 'confirmed';
+  honeypot?: string;
 }
 
+export type BookedAppointmentResult = Appointment & {
+  guestSecret?: string;
+};
+
 export function useAppointments() {
-  const { user, profile, role, authReady } = useAuth();
+  const { user, profile, role, authReady, ensureGuestSession } = useAuth();
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -101,14 +113,19 @@ export function useAppointments() {
     settings: ClinicSettings,
     catalogSeeded: boolean,
     schedules: ScheduleOverride[] = [],
-    slotLocks: SlotLock[] = []
-  ): Promise<Appointment> {
-    if (!user) {
-      throw new Error('Please sign in with Google to confirm your appointment request.');
+    slotLocks: BusySlot[] = [],
+    availabilityVerified = true,
+    availabilityError: string | null = null
+  ): Promise<BookedAppointmentResult> {
+    if (!availabilityVerified || availabilityError) {
+      throw new Error(
+        availabilityError ||
+          'Live slot availability is still loading or could not be verified from Firestore. Booking is blocked until availability is verified.'
+      );
     }
     if (!catalogSeeded) {
       throw new Error(
-        'Clinic catalog is not initialized in Firestore yet. Sign in as Admin to initialize doctors & services.'
+        'Clinic catalog is not initialized in Firestore yet. An Admin must sign in to initialize doctors & services.'
       );
     }
 
@@ -130,6 +147,13 @@ export function useAppointments() {
     if (!doctor) throw new Error('Selected dentist is unavailable.');
     if (!service) throw new Error('Selected dental service is unavailable.');
 
+    const slotsNeeded = getSlotsNeededForDuration(service.durationMins, settings.slotDurationMins);
+    if (slotsNeeded > MAX_SLOT_LOCKS) {
+      throw new Error(
+        `This service (${service.durationMins}m) requires ${slotsNeeded} grid slots, exceeding the ${MAX_SLOT_LOCKS}-slot atomic lock limit. Please contact clinic admin to adjust slot duration.`
+      );
+    }
+
     const openSlots = generateAvailableSlotsForDoctor({
       dateStr: input.date,
       doctor,
@@ -142,6 +166,41 @@ export function useAppointments() {
       throw new Error(
         'Selected time is unavailable for the full visit duration (closed hours, lunch break, holiday, or overlapping booking). Please choose another open slot.'
       );
+    }
+
+    const activeUser = user || (await ensureGuestSession());
+    const isStaffCreator =
+      !activeUser.isAnonymous && (role === 'admin' || role === 'receptionist');
+
+    if (
+      activeUser.isAnonymous &&
+      appointments.filter((a) => a.status === 'pending' || a.status === 'confirmed').length >= 5
+    ) {
+      throw new Error(
+        'Active guest session limit (5 upcoming bookings) reached. Manage existing visits in My Visits or create a patient account.'
+      );
+    }
+
+    // Server-side anti-spam & rate-limit gate before writing to Firestore
+    if (!isStaffCreator) {
+      const idToken = await activeUser.getIdToken();
+      const gateRes = await fetch('/api/guest/gate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          action: 'booking',
+          hp: input.honeypot || '',
+        }),
+      });
+      if (!gateRes.ok) {
+        const errBody = (await gateRes.json().catch(() => ({}))) as { error?: string };
+        throw new Error(
+          errBody.error || 'Booking temporarily rate-limited. Please wait and try again.'
+        );
+      }
     }
 
     const coveredTimes = getCoveredTimes(
@@ -159,28 +218,30 @@ export function useAppointments() {
 
     const apptId = `appt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const refCode = `FC-${Math.floor(1000 + Math.random() * 9000)}`;
-    const isStaffCreator = role === 'admin' || role === 'receptionist';
+    const guestSecret = generateGuestVisitSecret();
+    const guestTokenHash = await sha256Hex(guestSecret);
+
     const targetStatus: AppointmentStatus =
       isStaffCreator && input.initialStatus === 'confirmed' ? 'confirmed' : 'pending';
 
     const apptRef = doc(db, 'appointments', apptId);
-    const lockRefs = coveredLockIds.map((id) => doc(db, 'slotLocks', id));
+    const lookupRef = doc(db, 'visitLookups', guestTokenHash);
+    const busyRefs = coveredLockIds.map((id) => doc(db, 'busySlots', id));
     const patientDocId = isStaffCreator
       ? sanitizeId(`pt_${input.patientPhone.replace(/\D/g, '') || apptId}`)
-      : user.uid;
+      : activeUser.uid;
     const patientRef = doc(db, 'patients', patientDocId);
     const auditId = `log_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const auditRef = doc(db, 'auditLogs', auditId);
 
+    const resolvedEmail = (input.patientEmail || activeUser.email || '').trim().slice(0, 160);
     const apptData: Omit<Appointment, 'createdAt' | 'updatedAt'> = {
       id: apptId,
       referenceCode: refCode,
-      patientUid: user.uid,
+      patientUid: activeUser.uid,
       patientName: input.patientName.trim(),
       patientPhone: input.patientPhone.trim(),
-      ...(input.patientEmail || user.email
-        ? { patientEmail: (input.patientEmail || user.email || '').slice(0, 160) }
-        : {}),
+      ...(resolvedEmail ? { patientEmail: resolvedEmail } : {}),
       serviceId: service.id,
       serviceName: service.name,
       doctorId: doctor.id,
@@ -195,14 +256,15 @@ export function useAppointments() {
       staffNotes: '',
       slotLockId: coveredLockIds[0],
       slotLockIds: coveredLockIds,
+      guestTokenHash,
       isSample: false,
     };
 
     try {
       await runTransaction(db, async (tx) => {
-        // Read all covered slotLocks + patient record BEFORE writes
-        const lockSnaps = await Promise.all(lockRefs.map((ref) => tx.get(ref)));
-        if (lockSnaps.some((snap) => snap.exists())) {
+        // Read all covered public busySlots + patient record BEFORE writes
+        const busySnaps = await Promise.all(busyRefs.map((ref) => tx.get(ref)));
+        if (busySnaps.some((snap) => snap.exists())) {
           throw new Error(
             'That doctor & time window overlaps another reservation. Please pick another time.'
           );
@@ -218,9 +280,31 @@ export function useAppointments() {
             date: input.date,
             time: coveredTimes[idx],
             appointmentId: apptId,
-            bookedByUid: user.uid,
+            bookedByUid: activeUser.uid,
             createdAt: now,
           });
+          tx.set(doc(db, 'busySlots', lockId), {
+            doctorId: doctor.id,
+            date: input.date,
+            time: coveredTimes[idx],
+            createdAt: now,
+          });
+        });
+
+        tx.set(lookupRef, {
+          id: guestTokenHash,
+          appointmentId: apptId,
+          ownerUid: activeUser.uid,
+          referenceCode: refCode,
+          serviceName: service.name,
+          doctorId: doctor.id,
+          doctorName: doctor.name,
+          date: input.date,
+          time: input.time,
+          durationMins: service.durationMins,
+          status: targetStatus,
+          createdAt: now,
+          updatedAt: now,
         });
 
         if (patientSnap.exists()) {
@@ -236,7 +320,7 @@ export function useAppointments() {
         } else {
           tx.set(patientRef, {
             id: patientDocId,
-            ...(isStaffCreator ? {} : { uid: user.uid }),
+            ...(isStaffCreator ? {} : { uid: activeUser.uid }),
             fullName: apptData.patientName,
             phone: apptData.patientPhone,
             ...(apptData.patientEmail ? { email: apptData.patientEmail } : {}),
@@ -252,8 +336,8 @@ export function useAppointments() {
         if (isStaffCreator) {
           tx.set(auditRef, {
             id: auditId,
-            actorUid: user.uid,
-            actorEmail: user.email || 'staff',
+            actorUid: activeUser.uid,
+            actorEmail: activeUser.email || 'staff',
             actorRole: role === 'admin' ? 'admin' : 'receptionist',
             action: 'appointment.create',
             targetCollection: 'appointments',
@@ -268,14 +352,30 @@ export function useAppointments() {
         err instanceof Error &&
         (err.message.includes('overlaps') ||
           err.message.includes('Please') ||
-          err.message.includes('unavailable'))
+          err.message.includes('unavailable') ||
+          err.message.includes('limit') ||
+          err.message.includes('rate-limited'))
       ) {
         throw err;
       }
       handleFirestoreError(err, OperationType.WRITE, `appointments/${apptId}`);
     }
 
-    return apptData as Appointment;
+    saveLocalGuestVisitSecret({
+      appointmentId: apptId,
+      referenceCode: refCode,
+      secret: guestSecret,
+      serviceName: service.name,
+      doctorName: doctor.name,
+      date: input.date,
+      time: input.time,
+      createdAtIso: new Date().toISOString(),
+    });
+
+    return {
+      ...(apptData as Appointment),
+      guestSecret,
+    };
   }
 
   async function updateAppointmentStatus(
@@ -292,11 +392,15 @@ export function useAppointments() {
     }
 
     const apptRef = doc(db, 'appointments', appt.id);
+    const lookupRef = appt.guestTokenHash
+      ? doc(db, 'visitLookups', appt.guestTokenHash)
+      : null;
     const lockIdsToRelease =
       Array.isArray(appt.slotLockIds) && appt.slotLockIds.length > 0
         ? appt.slotLockIds
         : [appt.slotLockId || expectedLockId(appt.doctorId, appt.date, appt.time)];
     const lockRefs = lockIdsToRelease.map((id) => doc(db, 'slotLocks', id));
+    const busyRefs = lockIdsToRelease.map((id) => doc(db, 'busySlots', id));
 
     const auditId = `log_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const auditRef = doc(db, 'auditLogs', auditId);
@@ -308,8 +412,12 @@ export function useAppointments() {
       await runTransaction(db, async (tx) => {
         const apptSnap = await tx.get(apptRef);
         if (!apptSnap.exists()) throw new Error('Appointment no longer exists.');
+        const lookupSnap = lookupRef ? await tx.get(lookupRef) : null;
         const lockSnaps = shouldReleaseLock
           ? await Promise.all(lockRefs.map((ref) => tx.get(ref)))
+          : [];
+        const busySnaps = shouldReleaseLock
+          ? await Promise.all(busyRefs.map((ref) => tx.get(ref)))
           : [];
 
         const now = serverTimestamp();
@@ -323,10 +431,22 @@ export function useAppointments() {
 
         tx.update(apptRef, updates);
 
+        if (lookupRef && lookupSnap?.exists()) {
+          tx.update(lookupRef, {
+            status: nextStatus,
+            updatedAt: now,
+          });
+        }
+
         if (shouldReleaseLock) {
           lockSnaps.forEach((snap, idx) => {
             if (snap.exists()) {
               tx.delete(lockRefs[idx]);
+            }
+          });
+          busySnaps.forEach((snap, idx) => {
+            if (snap.exists()) {
+              tx.delete(busyRefs[idx]);
             }
           });
         }
@@ -363,9 +483,17 @@ export function useAppointments() {
     newDoctor: Doctor,
     settings: ClinicSettings,
     schedules: ScheduleOverride[] = [],
-    slotLocks: SlotLock[] = []
+    slotLocks: BusySlot[] = [],
+    availabilityVerified = true,
+    availabilityError: string | null = null
   ): Promise<void> {
     if (!user) throw new Error('Authentication required.');
+    if (!availabilityVerified || availabilityError) {
+      throw new Error(
+        availabilityError ||
+          'Live slot availability is still loading or could not be verified from Firestore. Rescheduling is blocked until availability is verified.'
+      );
+    }
     if (appt.status === 'completed' || appt.status === 'cancelled' || appt.status === 'no_show') {
       throw new Error('Terminal appointments cannot be rescheduled.');
     }
@@ -381,6 +509,11 @@ export function useAppointments() {
     });
     if (validationError) throw new Error(validationError);
 
+    const oldLockIds =
+      Array.isArray(appt.slotLockIds) && appt.slotLockIds.length > 0
+        ? appt.slotLockIds
+        : [appt.slotLockId || expectedLockId(appt.doctorId, appt.date, appt.time)];
+
     const openSlots = generateAvailableSlotsForDoctor({
       dateStr: newDate,
       doctor: newDoctor,
@@ -389,6 +522,7 @@ export function useAppointments() {
       settings,
       serviceDurationMins: appt.durationMins,
       ignoreAppointmentId: appt.id,
+      ignoreLockIds: oldLockIds,
     });
     if (!openSlots.includes(newTime)) {
       throw new Error(
@@ -396,10 +530,13 @@ export function useAppointments() {
       );
     }
 
-    const oldLockIds =
-      Array.isArray(appt.slotLockIds) && appt.slotLockIds.length > 0
-        ? appt.slotLockIds
-        : [appt.slotLockId || expectedLockId(appt.doctorId, appt.date, appt.time)];
+    const slotsNeeded = getSlotsNeededForDuration(appt.durationMins, settings.slotDurationMins);
+    if (slotsNeeded > MAX_SLOT_LOCKS) {
+      throw new Error(
+        `Visit duration (${appt.durationMins}m) requires ${slotsNeeded} grid slots, exceeding the ${MAX_SLOT_LOCKS}-slot lock limit.`
+      );
+    }
+
     const newCoveredTimes = getCoveredTimes(
       newTime,
       appt.durationMins,
@@ -414,48 +551,67 @@ export function useAppointments() {
     );
 
     const apptRef = doc(db, 'appointments', appt.id);
+    const lookupRef = appt.guestTokenHash
+      ? doc(db, 'visitLookups', appt.guestTokenHash)
+      : null;
     const isStaffActor = role === 'admin' || role === 'receptionist';
     const nextStatus: AppointmentStatus = isStaffActor ? appt.status : 'pending';
     const auditId = `log_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const auditRef = doc(db, 'auditLogs', auditId);
 
     const uniqueIds = Array.from(new Set([...oldLockIds, ...newLockIds]));
+    const lockIdsToRelease = oldLockIds.filter((oldId) => !newLockIds.includes(oldId));
 
     try {
       await runTransaction(db, async (tx) => {
         const apptSnap = await tx.get(apptRef);
         if (!apptSnap.exists()) throw new Error('Appointment no longer exists.');
+        const lookupSnap = lookupRef ? await tx.get(lookupRef) : null;
 
-        const lockSnaps = await Promise.all(
-          uniqueIds.map((id) => tx.get(doc(db, 'slotLocks', id)))
+        const busySnaps = await Promise.all(
+          uniqueIds.map((id) => tx.get(doc(db, 'busySlots', id)))
         );
-        const snapById = new Map(uniqueIds.map((id, idx) => [id, lockSnaps[idx]]));
+        const busyById = new Map(uniqueIds.map((id, idx) => [id, busySnaps[idx]]));
+
+        const releaseLockSnaps = await Promise.all(
+          lockIdsToRelease.map((id) => tx.get(doc(db, 'slotLocks', id)))
+        );
+        const releaseLockById = new Map(
+          lockIdsToRelease.map((id, idx) => [id, releaseLockSnaps[idx]])
+        );
 
         for (const targetLockId of newLockIds) {
-          const snap = snapById.get(targetLockId);
-          if (snap?.exists() && snap.data()?.appointmentId !== appt.id) {
+          const snap = busyById.get(targetLockId);
+          if (snap?.exists() && !oldLockIds.includes(targetLockId)) {
             throw new Error('The selected new time window overlaps another reserved slot.');
           }
         }
 
         const now = serverTimestamp();
 
-        // Delete old locks no longer in new window
-        oldLockIds.forEach((oldId) => {
-          if (!newLockIds.includes(oldId) && snapById.get(oldId)?.exists()) {
+        lockIdsToRelease.forEach((oldId) => {
+          if (releaseLockById.get(oldId)?.exists()) {
             tx.delete(doc(db, 'slotLocks', oldId));
+          }
+          if (busyById.get(oldId)?.exists()) {
+            tx.delete(doc(db, 'busySlots', oldId));
           }
         });
 
-        // Create new locks not already owned/present
         newLockIds.forEach((newId, idx) => {
-          if (!snapById.get(newId)?.exists()) {
+          if (!oldLockIds.includes(newId)) {
             tx.set(doc(db, 'slotLocks', newId), {
               doctorId: newDoctor.id,
               date: newDate,
               time: newCoveredTimes[idx],
               appointmentId: appt.id,
-              bookedByUid: appt.patientUid,
+              bookedByUid: user.uid,
+              createdAt: now,
+            });
+            tx.set(doc(db, 'busySlots', newId), {
+              doctorId: newDoctor.id,
+              date: newDate,
+              time: newCoveredTimes[idx],
               createdAt: now,
             });
           }
@@ -474,6 +630,16 @@ export function useAppointments() {
           payload.doctorName = newDoctor.name;
         }
         tx.update(apptRef, payload);
+
+        if (lookupRef && lookupSnap?.exists()) {
+          tx.update(lookupRef, {
+            date: newDate,
+            time: newTime,
+            status: nextStatus,
+            ...(isStaffActor ? { doctorId: newDoctor.id, doctorName: newDoctor.name } : {}),
+            updatedAt: now,
+          });
+        }
 
         if (isStaffActor) {
           tx.set(auditRef, {
@@ -497,11 +663,31 @@ export function useAppointments() {
     }
   }
 
+  async function lookupVisitBySecret(secret: string): Promise<VisitLookup | null> {
+    const clean = secret.trim();
+    if (clean.length < 16) {
+      throw new Error(
+        'Enter your full private tracking code (for example FCV-...). Short reference codes like FC-1001 cannot be looked up alone.'
+      );
+    }
+    await ensureGuestSession();
+    const tokenHash = await sha256Hex(clean);
+    const ref = doc(db, 'visitLookups', tokenHash);
+    try {
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return null;
+      return snap.data() as VisitLookup;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.GET, `visitLookups/${tokenHash}`);
+    }
+  }
+
   return {
     appointments,
     loading,
     bookAppointment,
     updateAppointmentStatus,
     rescheduleAppointment,
+    lookupVisitBySecret,
   };
 }

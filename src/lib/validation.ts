@@ -1,9 +1,9 @@
 import type {
   AppointmentStatus,
+  BusySlot,
   ClinicSettings,
   Doctor,
   ScheduleOverride,
-  SlotLock,
   WeekdayKey,
 } from '../types/clinic';
 
@@ -11,6 +11,7 @@ export const ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 export const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 export const TIME_REGEX = /^\d{2}:\d{2}$/;
 export const HEX_COLOR_REGEX = /^#[0-9a-fA-F]{3,8}$/;
+export const MAX_SLOT_LOCKS = 4;
 
 export function pad2(n: number): string {
   return String(n).padStart(2, '0');
@@ -84,9 +85,19 @@ export function minsToTime(mins: number): string {
   return `${pad2(Math.floor(mins / 60))}:${pad2(mins % 60)}`;
 }
 
+export function getSlotsNeededForDuration(durationMins: number, stepMins: number): number {
+  const step = Math.max(15, stepMins || 30);
+  return Math.max(1, Math.ceil((durationMins || step) / step));
+}
+
 export function getCoveredTimes(startTime: string, durationMins: number, stepMins: number): string[] {
   const step = Math.max(15, stepMins || 30);
-  const slotsNeeded = Math.min(16, Math.max(1, Math.ceil((durationMins || step) / step)));
+  const slotsNeeded = getSlotsNeededForDuration(durationMins, step);
+  if (slotsNeeded > MAX_SLOT_LOCKS) {
+    throw new Error(
+      `Visit duration (${durationMins}m) requires ${slotsNeeded} slots on a ${step}m grid, exceeding the ${MAX_SLOT_LOCKS}-slot atomic lock limit.`
+    );
+  }
   const start = timeToMins(startTime);
   const times: string[] = [];
   for (let i = 0; i < slotsNeeded; i++) {
@@ -111,10 +122,11 @@ export function generateAvailableSlotsForDoctor(params: {
   dateStr: string;
   doctor: Doctor;
   schedules: ScheduleOverride[];
-  slotLocks: SlotLock[];
+  slotLocks: Array<BusySlot & { appointmentId?: string }>;
   settings: ClinicSettings;
   serviceDurationMins?: number;
   ignoreAppointmentId?: string;
+  ignoreLockIds?: string[];
 }): string[] {
   const {
     dateStr,
@@ -124,6 +136,7 @@ export function generateAvailableSlotsForDoctor(params: {
     settings,
     serviceDurationMins,
     ignoreAppointmentId,
+    ignoreLockIds,
   } = params;
   if (!DATE_REGEX.test(dateStr) || !doctor.active) return [];
 
@@ -142,6 +155,9 @@ export function generateAvailableSlotsForDoctor(params: {
   const endMins = Math.min(timeToMins(clinicDay.end), timeToMins(docDay.end));
   const step = settings.slotDurationMins || 30;
   const duration = Math.max(step, serviceDurationMins || step);
+  if (getSlotsNeededForDuration(duration, step) > MAX_SLOT_LOCKS) {
+    return [];
+  }
 
   const lunchStart = docDay.lunchStart
     ? timeToMins(docDay.lunchStart)
@@ -154,13 +170,17 @@ export function generateAvailableSlotsForDoctor(params: {
       ? timeToMins(clinicDay.lunchEnd)
       : null;
 
+  const ignoreSet = new Set(ignoreLockIds || []);
   const blockedSet = new Set<string>();
   docOverrides.forEach((ov) => ov.blockedSlots.forEach((t) => blockedSet.add(t)));
   slotLocks.forEach((lock) => {
+    const lockId = expectedLockId(lock.doctorId, lock.date, lock.time);
+    const matchesIgnoredAppt = Boolean(ignoreAppointmentId && lock.appointmentId === ignoreAppointmentId);
     if (
       lock.doctorId === doctor.id &&
       lock.date === dateStr &&
-      lock.appointmentId !== ignoreAppointmentId
+      !matchesIgnoredAppt &&
+      !ignoreSet.has(lockId)
     ) {
       blockedSet.add(lock.time);
     }
@@ -170,7 +190,7 @@ export function generateAvailableSlotsForDoctor(params: {
   const openGridTimes = new Set<string>();
   const allGridTimes: string[] = [];
   for (let m = startMins; m + step <= endMins; m += step) {
-    if (lunchStart !== null && lunchEnd !== null && m >= lunchStart && m < lunchEnd) {
+    if (lunchStart !== null && lunchEnd !== null && m < lunchEnd && m + step > lunchStart) {
       continue;
     }
     const t = minsToTime(m);
@@ -244,11 +264,121 @@ export const STATUS_LABELS: Record<AppointmentStatus, string> = {
   no_show: 'No-show',
 };
 
+export function generateGuestVisitSecret(): string {
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+  return `FCV-${hex.slice(0, 6)}-${hex.slice(6, 12)}-${hex.slice(12, 18)}-${hex.slice(18, 24)}`;
+}
+
+export async function sha256Hex(input: string): Promise<string> {
+  const encoded = new TextEncoder().encode(input.trim());
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', encoded);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export interface LocalGuestVisitSecret {
+  appointmentId: string;
+  referenceCode: string;
+  secret: string;
+  serviceName: string;
+  doctorName: string;
+  date: string;
+  time: string;
+  createdAtIso: string;
+}
+
+const GUEST_SECRETS_KEY = 'fc_guest_visit_secrets_v1';
+
+export function getLocalGuestVisitSecrets(): LocalGuestVisitSecret[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(GUEST_SECRETS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is LocalGuestVisitSecret =>
+        Boolean(item) &&
+        typeof item === 'object' &&
+        typeof item.appointmentId === 'string' &&
+        typeof item.secret === 'string' &&
+        typeof item.referenceCode === 'string'
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalGuestVisitSecret(entry: LocalGuestVisitSecret): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const existing = getLocalGuestVisitSecrets().filter(
+      (x) => x.appointmentId !== entry.appointmentId
+    );
+    const next = [entry, ...existing].slice(0, 20);
+    window.localStorage.setItem(GUEST_SECRETS_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function getLocalGuestSecretForAppointment(appointmentId: string): string | null {
+  const found = getLocalGuestVisitSecrets().find((x) => x.appointmentId === appointmentId);
+  return found?.secret || null;
+}
+
 export function formatUserFriendlyError(
   err: unknown,
   fallback = 'Something went wrong. Please try again.'
 ): string {
+  const code =
+    err && typeof err === 'object' && 'code' in err && typeof (err as { code: unknown }).code === 'string'
+      ? (err as { code: string }).code
+      : '';
   const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+
+  // Map common Firebase Auth error codes cleanly
+  if (code || raw.includes('auth/')) {
+    const c = code || (raw.match(/auth\/[a-z0-9-]+/i)?.[0] ?? '');
+    switch (c) {
+      case 'auth/invalid-credential':
+      case 'auth/wrong-password':
+      case 'auth/user-not-found':
+        return 'Incorrect email or password. Please check your credentials or use Forgot Password.';
+      case 'auth/invalid-email':
+        return 'Please enter a valid email address.';
+      case 'auth/email-already-in-use':
+        return 'An account with this email already exists. Please sign in instead.';
+      case 'auth/weak-password':
+        return 'Password is too weak. Please use at least 6 characters.';
+      case 'auth/too-many-requests':
+        return 'Too many attempts. Please wait a few minutes before trying again.';
+      case 'auth/popup-closed-by-user':
+      case 'auth/cancelled-popup-request':
+        return 'Google sign-in popup was closed before completing.';
+      case 'auth/popup-blocked':
+        return 'Sign-in popup was blocked by your browser. Please allow popups for this site and try again.';
+      case 'auth/credential-already-in-use':
+        return 'This login credential is already associated with another existing account.';
+      case 'auth/operation-not-allowed':
+      case 'auth/admin-restricted-operation':
+        return 'This sign-in method is not enabled in Firebase Console yet (Authentication → Sign-in method → enable Anonymous & Email/Password).';
+      case 'auth/unauthorized-domain':
+        return 'This domain is not authorized in Firebase Console → Authentication → Settings → Authorized domains.';
+      case 'auth/network-request-failed':
+        return 'Network error communicating with authentication service. Please check your connection.';
+      case 'auth/requires-recent-login':
+        return 'For security, please sign out and sign in again before completing this action.';
+    }
+  }
+
   if (!raw) return fallback;
 
   // Handle JSON-serialized FirestoreErrorInfo emitted by handleFirestoreError
@@ -274,4 +404,3 @@ export function formatUserFriendlyError(
 
   return raw;
 }
-

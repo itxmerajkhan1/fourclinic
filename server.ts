@@ -4,8 +4,9 @@ import {
   handleAuthBootstrapRole,
   handleAuthVerify,
   handleChat,
+  handleGuestGate,
   handleHealth,
-} from './lib/serverHandlers';
+} from './lib/serverHandlers.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -15,20 +16,32 @@ const isProd = process.env.NODE_ENV === 'production';
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '64kb' }));
 
-app.get('/api/health', (req, res) => {
+app.all('/api/health', (req, res) => {
+  if (req.method && req.method !== 'GET' && req.method !== 'HEAD') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
   void handleHealth(req, res);
 });
 
-app.post('/api/auth/verify', (req, res) => {
+app.all('/api/auth/verify', (req, res) => {
   void handleAuthVerify(req, res);
 });
 
-app.post('/api/auth/bootstrap-role', (req, res) => {
+app.all('/api/auth/bootstrap-role', (req, res) => {
   void handleAuthBootstrapRole(req, res);
 });
 
-app.post('/api/chat', (req, res) => {
+app.all('/api/chat', (req, res) => {
   void handleChat(req, res);
+});
+
+app.all('/api/guest/gate', (req, res) => {
+  void handleGuestGate(req, res);
+});
+
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'API route not found' });
 });
 
 async function startServer() {

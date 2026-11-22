@@ -1,5 +1,13 @@
-import { useState } from 'react';
-import { Sparkles, Stethoscope, ShieldCheck, Smile, Wrench, HeartPulse } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  ArrowRight,
+  HeartPulse,
+  ShieldCheck,
+  Smile,
+  Sparkles,
+  Stethoscope,
+  Wrench,
+} from 'lucide-react';
 import type { ServiceItem } from '../../types/clinic';
 
 interface ServicesAndPricingProps {
@@ -10,17 +18,17 @@ interface ServicesAndPricingProps {
 function renderServiceIcon(iconKey: string) {
   switch (iconKey) {
     case 'cleaning':
-      return <Sparkles className="w-6 h-6" />;
+      return <Sparkles className="w-5 h-5" />;
     case 'whitening':
-      return <Smile className="w-6 h-6" />;
+      return <Smile className="w-5 h-5" />;
     case 'braces':
-      return <Wrench className="w-6 h-6" />;
+      return <Wrench className="w-5 h-5" />;
     case 'implant':
-      return <ShieldCheck className="w-6 h-6" />;
+      return <ShieldCheck className="w-5 h-5" />;
     case 'rootcanal':
-      return <HeartPulse className="w-6 h-6" />;
+      return <HeartPulse className="w-5 h-5" />;
     default:
-      return <Stethoscope className="w-6 h-6" />;
+      return <Stethoscope className="w-5 h-5" />;
   }
 }
 
@@ -30,154 +38,195 @@ export function ServicesAndPricing({ services, onBookService }: ServicesAndPrici
   const [sliderPos, setSliderPos] = useState(84);
   const activeServices = services.filter((s) => s.active);
 
-  const cardBg = ['bg-[#9dbec4]', 'bg-[#a9c6cb]', 'bg-[#b3ccd1]'];
-
   return (
     <>
       {/* Services */}
-      <section id="services" className="max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 py-14">
-        <div className="flex flex-wrap justify-between items-end gap-6 mb-8">
+      <section
+        id="services"
+        className="scroll-mt-24 max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 py-16 lg:py-20"
+      >
+        <div className="flex flex-wrap justify-between items-end gap-6 pb-8 border-b border-[#D8DFD9]">
           <div>
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-[#4d8a96]">
-              Dental services, clearly priced
-            </h2>
-            <p className="mt-2.5 text-base text-[#42565c] max-w-xl">
-              Every service shows duration and price range upfront. Pick a treatment below to jump directly to live slot booking.
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#426F77]">
+              01 · Clinical Disciplines
             </p>
+            <h2 className="mt-2 font-editorial text-4xl sm:text-[50px] text-[#102E34] leading-[1.04]">
+              Treatments, clearly <em className="italic text-[#426F77] font-normal">outlined</em>
+            </h2>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <span className="px-4 py-2 rounded-full bg-[#f0f5f5] text-xs font-bold text-[#33474d]">
-              Digital X-rays
-            </span>
-            <span className="px-4 py-2 rounded-full bg-[#f0f5f5] text-xs font-bold text-[#33474d]">
-              Same-day urgent triage
-            </span>
-          </div>
+          <p className="text-sm sm:text-base text-[#3B5257] max-w-md leading-relaxed">
+            Sample treatment plans displaying duration and fee estimates upfront. Select any option to
+            pre-fill matching dentist slots.
+          </p>
         </div>
 
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {activeServices.map((svc, idx) => (
-            <article
-              key={svc.id}
-              className={`${cardBg[idx % 3]} rounded-[20px] p-7 relative overflow-hidden min-h-[235px] flex flex-col`}
-            >
-              <div
-                aria-hidden="true"
-                className="w-[170px] h-[170px] rounded-full bg-white/15 absolute -right-14 -bottom-16"
-              />
-              <div className="w-14 h-14 rounded-full bg-white flex items-center justify-center text-[#4d8a96] mb-7 shadow-sm">
-                {renderServiceIcon(svc.iconKey)}
-              </div>
-              <h3 className="text-xl font-extrabold text-white">{svc.name}</h3>
-              <p className="text-white/90 mt-2 text-sm leading-relaxed">{svc.description}</p>
-              <p className="text-white/80 mt-2 text-xs font-semibold">
-                {svc.priceLabel} · {svc.durationMins} mins
-              </p>
-              <button
-                type="button"
-                onClick={() => onBookService(svc.id)}
-                className="mt-auto pt-4 self-start text-sm font-extrabold text-white underline underline-offset-4 hover:opacity-85 cursor-pointer z-10"
+        <div className="mt-8 grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+          {activeServices.map((svc, idx) => {
+            const highlighted = idx === 0;
+            return (
+              <article
+                key={svc.id}
+                className={`rounded-lg border p-6 sm:p-7 flex flex-col justify-between transition-colors ${
+                  highlighted
+                    ? 'bg-[#DCE8E3]/70 border-[#426F77]/35'
+                    : 'bg-white border-[#D8DFD9] hover:border-[#426F77]'
+                }`}
               >
-                Book {svc.name} →
-              </button>
-            </article>
-          ))}
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-xs font-semibold text-[#426F77] fc-tabular">
+                      {String(idx + 1).padStart(2, '0')}
+                    </span>
+                    <span className="w-10 h-10 rounded-md border border-[#D8DFD9] bg-[#F7F5F0] text-[#102E34] flex items-center justify-center">
+                      {renderServiceIcon(svc.iconKey)}
+                    </span>
+                  </div>
+
+                  <h3 className="mt-6 font-editorial text-[28px] leading-[1.12] text-[#102E34]">
+                    {svc.name}
+                  </h3>
+                  <p className="mt-2.5 text-sm text-[#3B5257] leading-relaxed">{svc.description}</p>
+                </div>
+
+                <div className="mt-6 pt-4 border-t border-[#D8DFD9]/80 flex items-center justify-between gap-3">
+                  <div className="text-xs text-[#3B5257] fc-tabular">
+                    <b className="text-sm font-bold text-[#102E34]">{svc.priceLabel}</b>
+                    <span className="mx-1.5 text-[#5B7074]">·</span>
+                    <span>{svc.durationMins} mins</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onBookService(svc.id)}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#102E34] hover:text-[#426F77] transition cursor-pointer"
+                  >
+                    <span>Book</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
       </section>
 
-      {/* Transparent Pricing */}
-      <section id="pricing" className="max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 pt-2 pb-14">
-        <div className="flex flex-wrap justify-between items-end gap-6 mb-7">
+      {/* Transparent Pricing Ledger */}
+      <section
+        id="pricing"
+        className="scroll-mt-24 max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 pb-16 lg:pb-20"
+      >
+        <div className="flex flex-wrap justify-between items-end gap-6 mb-8">
           <div>
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-[#4d8a96]">
-              Prices, insurance &amp; payment plans
-            </h2>
-            <p className="mt-2 text-base text-[#42565c] max-w-xl">
-              Full price list in one place — no surprises. Final quotes are always confirmed after an examination, before treatment starts.
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#426F77]">
+              02 · Sample Fee Schedule
             </p>
+            <h2 className="mt-2 font-editorial text-4xl sm:text-[48px] text-[#102E34] leading-[1.05]">
+              Illustrative visit estimates
+            </h2>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <span className="px-4 py-2 rounded-full bg-[#f0f5f5] text-xs font-bold text-[#33474d]">
-              Itemized receipts
-            </span>
-            <span className="px-4 py-2 rounded-full bg-[#f0f5f5] text-xs font-bold text-[#33474d]">
-              0% plans over $500
-            </span>
-          </div>
+          <p className="text-sm text-[#3B5257] max-w-md leading-relaxed">
+            Portfolio demonstration pricing. In clinical practice, final treatment plans are
+            confirmed after an in-person diagnostic exam.
+          </p>
         </div>
 
-        <div className="border border-[#e3ebec] rounded-2xl overflow-hidden divide-y divide-[#e3ebec] bg-white">
-          {activeServices.map((svc) => (
-            <div
-              key={svc.id}
-              className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-[#f9fcfc] transition-colors"
-            >
-              <div>
-                <b className="text-base font-extrabold text-[#12262e]">{svc.name}</b>
-                <p className="text-xs text-[#5d737a] mt-0.5">{svc.includes}</p>
-              </div>
-              <div className="flex items-center gap-4 shrink-0">
-                <span className="text-xs font-semibold text-[#5d737a] fc-tabular">{svc.durationMins} mins</span>
-                <span className="text-base font-extrabold text-[#4d8a96] min-w-[92px] text-right fc-tabular">
+        <div className="bg-white border border-[#D8DFD9] rounded-lg overflow-hidden">
+          <div className="hidden md:grid grid-cols-[1.4fr_1.4fr_90px_120px_100px] gap-4 px-6 py-3 bg-[#EFECE4] border-b border-[#D8DFD9] text-[11px] font-semibold uppercase tracking-[0.12em] text-[#5B7074]">
+            <span>Treatment</span>
+            <span>Included Scope</span>
+            <span className="text-right">Duration</span>
+            <span className="text-right">Estimate</span>
+            <span className="text-right">Schedule</span>
+          </div>
+
+          <div className="divide-y divide-[#E6EAE4]">
+            {activeServices.map((svc) => (
+              <div
+                key={svc.id}
+                className="px-4 py-4 sm:px-6 grid grid-cols-1 md:grid-cols-[1.4fr_1.4fr_90px_120px_100px] gap-2 md:gap-4 items-start md:items-center hover:bg-[#F7F5F0]/60 transition-colors"
+              >
+                <b className="text-sm sm:text-[15px] font-bold text-[#102E34]">{svc.name}</b>
+                <p className="text-xs text-[#5B7074]">{svc.includes}</p>
+                <span className="text-xs font-medium text-[#3B5257] md:text-right fc-tabular">
+                  {svc.durationMins} mins
+                </span>
+                <span className="text-sm font-bold text-[#102E34] md:text-right fc-tabular">
                   {svc.priceLabel}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => onBookService(svc.id)}
-                  className="px-3.5 py-1.5 rounded-full bg-[#e7eff1] text-[#3d7280] text-xs font-bold hover:bg-[#4d8a96] hover:text-white transition cursor-pointer"
-                >
-                  Select
-                </button>
+                <div className="md:text-right pt-1 md:pt-0">
+                  <button
+                    type="button"
+                    onClick={() => onBookService(svc.id)}
+                    className="px-3.5 py-1.5 rounded-md border border-[#D8DFD9] bg-[#F7F5F0] text-[#102E34] text-xs font-semibold hover:bg-[#102E34] hover:text-[#F7F5F0] hover:border-[#102E34] transition cursor-pointer"
+                  >
+                    Select
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
 
-        <div className="grid md:grid-cols-3 gap-4 mt-6">
-          <div className="p-5 rounded-2xl bg-[#f4f8f8] border border-[#e3ebec]">
-            <b className="text-base text-[#12262e]">Insurance, verified for you</b>
-            <p className="mt-1.5 text-sm text-[#42565c] leading-relaxed">
-              We work with most major PPO plans. Share your plan name in chat and our front desk verifies coverage before your visit.
+        <div className="grid md:grid-cols-3 gap-5 mt-6">
+          <div className="p-5 rounded-lg bg-[#F7F5F0] border border-[#D8DFD9]">
+            <b className="block text-sm font-bold text-[#102E34]">Sample insurance listing</b>
+            <p className="mt-1.5 text-xs sm:text-sm text-[#3B5257] leading-relaxed">
+              Insurance carrier names displayed here are fictional placeholders. No live carrier
+              eligibility checks are performed.
             </p>
           </div>
-          <div className="p-5 rounded-2xl bg-[#f4f8f8] border border-[#e3ebec]">
-            <b className="text-base text-[#12262e]">0% payment plans</b>
-            <p className="mt-1.5 text-sm text-[#42565c] leading-relaxed">
-              Treatments over $500 can be split into monthly payments at 0% interest, agreed in writing before we start.
+          <div className="p-5 rounded-lg bg-[#F7F5F0] border border-[#D8DFD9]">
+            <b className="block text-sm font-bold text-[#102E34]">No financial commitments</b>
+            <p className="mt-1.5 text-xs sm:text-sm text-[#3B5257] leading-relaxed">
+              Bookings created here are demo requests only — no payments, billing, or credit
+              agreements are processed online.
             </p>
           </div>
-          <div className="p-5 rounded-2xl bg-[#f4f8f8] border border-[#e3ebec]">
-            <b className="text-base text-[#12262e]">Clear quotes, in writing</b>
-            <p className="mt-1.5 text-sm text-[#42565c] leading-relaxed">
-              Every treatment plan comes with an itemized quote. Nothing proceeds without your explicit consent.
+          <div className="p-5 rounded-lg bg-[#F7F5F0] border border-[#D8DFD9]">
+            <b className="block text-sm font-bold text-[#102E34]">Upfront estimate ranges</b>
+            <p className="mt-1.5 text-xs sm:text-sm text-[#3B5257] leading-relaxed">
+              Every service shows estimated visit duration and sample cost range before selecting a
+              time slot.
             </p>
           </div>
         </div>
       </section>
 
       {/* Interactive Whitening Before / After SVG Slider */}
-      <section id="results" className="max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 pt-2 pb-14">
-        <div className="mb-6">
-          <h2 className="text-3xl sm:text-4xl font-extrabold text-[#4d8a96]">
-            Brighter in a single visit
-          </h2>
-          <p className="mt-2 text-base text-[#42565c]">
-            Drag the handle to compare a typical whitening result.{' '}
-            <em className="text-[#5d737a]">Illustration only — individual results vary.</em>
+      <section
+        id="results"
+        className="scroll-mt-24 max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 pb-16 lg:pb-20"
+      >
+        <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#426F77]">
+              03 · Visual Comparison
+            </p>
+            <h2 className="mt-1.5 font-editorial text-3xl sm:text-[42px] text-[#102E34]">
+              Brighter in a single session
+            </h2>
+          </div>
+          <p className="text-xs sm:text-sm text-[#3B5257]">
+            Drag handle to compare whitening shades.{' '}
+            <em className="text-[#5B7074]">Illustration only — individual results vary.</em>
           </p>
         </div>
 
         <div
-          className="relative rounded-3xl overflow-hidden bg-[#e89a90] h-[220px] sm:h-[250px] select-none focus-within:ring-2 focus-within:ring-[#4d8a96] focus-within:ring-offset-2"
+          className="relative rounded-lg border border-[#D8DFD9] overflow-hidden bg-[#C7775F] h-[210px] sm:h-[250px] select-none focus-within:ring-2 focus-within:ring-[#102E34] focus-within:ring-offset-2"
           style={{ '--pos': `${sliderPos}%` } as React.CSSProperties}
         >
-          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 560 120" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+          <svg
+            className="absolute inset-0 w-full h-full"
+            viewBox="0 0 560 120"
+            preserveAspectRatio="xMidYMid slice"
+            aria-hidden="true"
+          >
             {TOOTH_X.map((x) => (
               <g key={`b-${x}`}>
                 <path
                   d={`M${x} 22 C${x} 8 ${x + 52} 8 ${x + 52} 22 C${x + 52} 40 ${x + 46} 58 ${x + 42} 88 C${x + 40} 106 ${x + 30} 106 ${x + 27} 88 C${x + 25} 76 ${x + 25} 76 ${x + 22} 88 C${x + 19} 106 ${x + 9} 106 ${x + 7} 88 C${x + 3} 58 ${x} 40 ${x} 22 Z`}
-                  fill="#e8d189"
-                  stroke="#c9a94f"
+                  fill="#E8D189"
+                  stroke="#C9A94F"
                   strokeWidth="2.5"
                 />
                 <path
@@ -203,7 +252,7 @@ export function ServicesAndPricing({ services, onBookService }: ServicesAndPrici
                 <path
                   d={`M${x} 22 C${x} 8 ${x + 52} 8 ${x + 52} 22 C${x + 52} 40 ${x + 46} 58 ${x + 42} 88 C${x + 40} 106 ${x + 30} 106 ${x + 27} 88 C${x + 25} 76 ${x + 25} 76 ${x + 22} 88 C${x + 19} 106 ${x + 9} 106 ${x + 7} 88 C${x + 3} 58 ${x} 40 ${x} 22 Z`}
                   fill="#ffffff"
-                  stroke="#bcd6da"
+                  stroke="#BFD2D5"
                   strokeWidth="2.5"
                 />
                 <path
@@ -218,18 +267,18 @@ export function ServicesAndPricing({ services, onBookService }: ServicesAndPrici
             ))}
           </svg>
 
-          <span className="absolute top-3.5 left-3.5 bg-[#5a2823]/60 text-white text-xs font-bold px-3 py-1 rounded-full z-10">
+          <span className="absolute top-3.5 left-3.5 bg-[#102E34]/80 text-[#F7F5F0] text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded-sm z-10">
             Before
           </span>
-          <span className="absolute top-3.5 right-3.5 bg-[#5a2823]/60 text-white text-xs font-bold px-3 py-1 rounded-full z-10">
+          <span className="absolute top-3.5 right-3.5 bg-[#102E34]/80 text-[#F7F5F0] text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded-sm z-10">
             After
           </span>
 
           <div
             aria-hidden="true"
-            className="fc-ba-handle absolute inset-y-0 w-[3px] bg-white z-10 -translate-x-1/2"
+            className="fc-ba-handle absolute inset-y-0 w-[2px] bg-[#102E34] z-10 -translate-x-1/2"
           >
-            <span className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white flex items-center justify-center text-lg text-[#3d7280] shadow-lg">
+            <span className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white border border-[#102E34] flex items-center justify-center text-sm font-bold text-[#102E34] shadow-md">
               ⇆
             </span>
           </div>

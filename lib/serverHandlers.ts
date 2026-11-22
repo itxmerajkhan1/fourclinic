@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { getApp, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
@@ -26,15 +27,21 @@ let cachedFirebaseConfig: FirebaseAppletConfig | null = null;
 
 export function getFirebaseConfig(): FirebaseAppletConfig {
   if (cachedFirebaseConfig) return cachedFirebaseConfig;
-  const firebaseConfigPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-  if (fs.existsSync(firebaseConfigPath)) {
-    try {
-      cachedFirebaseConfig = JSON.parse(
-        fs.readFileSync(firebaseConfigPath, 'utf8')
-      ) as FirebaseAppletConfig;
-      return cachedFirebaseConfig;
-    } catch {
-      cachedFirebaseConfig = {};
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(moduleDir, '../firebase-applet-config.json'),
+  ];
+  for (const firebaseConfigPath of candidatePaths) {
+    if (fs.existsSync(firebaseConfigPath)) {
+      try {
+        cachedFirebaseConfig = JSON.parse(
+          fs.readFileSync(firebaseConfigPath, 'utf8')
+        ) as FirebaseAppletConfig;
+        return cachedFirebaseConfig;
+      } catch {
+        // Fall through to next candidate or env fallback
+      }
     }
   }
   cachedFirebaseConfig = {
@@ -354,8 +361,125 @@ export async function checkDistributedChatRateLimit(
   return { ...mem, backend: 'memory' };
 }
 
+const GUEST_ACTION_WINDOW_MS = 300_000;
+const GUEST_BOOKING_MAX = 10;
+const GUEST_INQUIRY_MAX = 8;
+const guestRateMap = new Map<string, number[]>();
+
+export function checkGuestActionMemoryRateLimit(
+  action: 'booking' | 'inquiry',
+  key: string,
+  now = Date.now()
+): { allowed: boolean; remaining: number; limit: number; retryAfterSec: number } {
+  const limit = action === 'booking' ? GUEST_BOOKING_MAX : GUEST_INQUIRY_MAX;
+  const mapKey = `${action}:${key}`;
+  const cutoff = now - GUEST_ACTION_WINDOW_MS;
+  const existing = (guestRateMap.get(mapKey) || []).filter((ts) => ts > cutoff);
+
+  if (existing.length >= limit) {
+    const oldest = existing[0] || now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + GUEST_ACTION_WINDOW_MS - now) / 1000));
+    guestRateMap.set(mapKey, existing);
+    return { allowed: false, remaining: 0, limit, retryAfterSec };
+  }
+
+  existing.push(now);
+  guestRateMap.set(mapKey, existing);
+
+  if (guestRateMap.size > 2000) {
+    for (const [entryKey, stamps] of guestRateMap.entries()) {
+      const fresh = stamps.filter((ts) => ts > cutoff);
+      if (fresh.length === 0) guestRateMap.delete(entryKey);
+      else guestRateMap.set(entryKey, fresh);
+    }
+  }
+
+  return {
+    allowed: true,
+    remaining: Math.max(0, limit - existing.length),
+    limit,
+    retryAfterSec: 0,
+  };
+}
+
+export async function checkDistributedGuestActionRateLimit(
+  action: 'booking' | 'inquiry',
+  key: string,
+  now = Date.now()
+): Promise<{
+  allowed: boolean;
+  remaining: number;
+  limit: number;
+  retryAfterSec: number;
+  backend: 'upstash-redis' | 'memory';
+}> {
+  const limit = action === 'booking' ? GUEST_BOOKING_MAX : GUEST_INQUIRY_MAX;
+  const safeKey = key.replace(/[^a-zA-Z0-9._:-]/g, '_').slice(0, 96) || 'unknown';
+  const cfg = getValidatedUpstashConfig();
+
+  if (cfg && !('invalid' in cfg)) {
+    try {
+      const windowBucket = Math.floor(now / GUEST_ACTION_WINDOW_MS);
+      const redisKey = `fc:rl:guest:${action}:${safeKey}:${windowBucket}`;
+      const resp = await fetch(`${cfg.url}/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([
+          ['INCR', redisKey],
+          ['EXPIRE', redisKey, Math.ceil(GUEST_ACTION_WINDOW_MS / 1000) + 10, 'NX'],
+        ]),
+        signal: AbortSignal.timeout(REDIS_TIMEOUT_MS),
+      });
+      if (resp.ok) {
+        const results = (await resp.json()) as Array<{ result?: unknown; error?: unknown }>;
+        const count = Number(results?.[0]?.result);
+        const itemErr = results?.[0]?.error;
+        if (!itemErr && Number.isInteger(count) && count >= 1) {
+          if (count > limit) {
+            const msIntoWindow = now % GUEST_ACTION_WINDOW_MS;
+            const retryAfterSec = Math.max(
+              1,
+              Math.ceil((GUEST_ACTION_WINDOW_MS - msIntoWindow) / 1000)
+            );
+            return {
+              allowed: false,
+              remaining: 0,
+              limit,
+              retryAfterSec,
+              backend: 'upstash-redis',
+            };
+          }
+          return {
+            allowed: true,
+            remaining: Math.max(0, limit - count),
+            limit,
+            retryAfterSec: 0,
+            backend: 'upstash-redis',
+          };
+        }
+      }
+    } catch (err) {
+      console.warn(`Upstash guest rate-limit fallback (${summarizeSafeRedisError(err)}).`);
+    }
+  }
+
+  const mem = checkGuestActionMemoryRateLimit(action, safeKey, now);
+  return { ...mem, backend: 'memory' };
+}
+
 function parseJsonBody<T>(req: ApiRequest): T | null {
   if (req.body == null) return null;
+  if (Buffer.isBuffer(req.body)) {
+    if (req.body.length > 65_536) return null;
+    try {
+      return JSON.parse(req.body.toString('utf8')) as T;
+    } catch {
+      return null;
+    }
+  }
   if (typeof req.body === 'string') {
     if (req.body.length > 65_536) return null;
     try {
@@ -467,6 +591,7 @@ export interface ChatContextPayload {
     doctors?: Array<{ id: string; name: string; role: string; specialty: string; languages: string }>;
     upcomingSlots?: Array<{ date: string; doctorId: string; doctorName: string; times: string[] }>;
     allowChatbotBooking?: boolean;
+    availabilityVerified?: boolean;
   };
 }
 
@@ -557,6 +682,7 @@ export async function handleChat(req: ApiRequest, res: ApiResponse) {
         }))
     : [];
   const allowChatbotBooking = ctx.allowChatbotBooking !== false;
+  const availabilityVerified = ctx.availabilityVerified !== false;
 
   const historyLines = Array.isArray(body?.history)
     ? body.history
@@ -592,19 +718,20 @@ CLINIC FACTS (PUBLIC CATALOG ONLY):
 - Services & Prices: ${JSON.stringify(servicesList)}
 - Active Doctors: ${JSON.stringify(doctorsList)}
 - Live Duration-Verified Open Slots (non-PII): ${JSON.stringify(slotsList)}
+- Live Slot Availability Verified: ${availabilityVerified}
 - Chatbot Booking Enabled: ${allowChatbotBooking}
 - Caller verified signed-in: ${verifiedUser}
 
 RECEPTIONIST WORKFLOW & BOOKING RULES:
 1. Answer service, pricing, insurance, doctor specialty, and clinic hours questions strictly using the facts above. Do NOT invent doctors, prices, or slots.
-2. When checking availability or helping book: check Live Open Slots. If no slots exist for the requested date/doctor, clearly say none are open and suggest the nearest available date/time from Live Open Slots.
-3. To create a booking request inside chat (when Chatbot Booking Enabled is true), collect ALL required details step-by-step:
+2. When checking availability or helping book: check Live Slot Availability Verified first. If false, clearly apologize that live calendar availability cannot be verified from the database right now, NEVER claim slots are open or closed, and NEVER set bookingReadyToConfirm=true. Otherwise check Live Open Slots; if no slots exist for the requested date/doctor, clearly say none are open and suggest the nearest available date/time from Live Open Slots.
+3. To create a booking request inside chat (when Chatbot Booking Enabled is true and Live Slot Availability Verified is true), collect ALL required details step-by-step:
    - Treatment (suggestedServiceId)
    - Preferred doctor (suggestedDoctorId)
    - Date (YYYY-MM-DD in suggestedDate) & Time (HH:MM 24h in suggestedTime from Live Open Slots)
    - Patient full name (draftPatientName, 2-80 chars, no digits)
    - Patient phone/WhatsApp (draftPatientPhone, 7-15 digits)
-4. Set bookingReadyToConfirm=true ONLY when ALL 6 fields above are explicitly known and confirmed in the conversation, and tell the patient to review and click the "Confirm & Submit Request" card below.
+4. Set bookingReadyToConfirm=true ONLY when Live Slot Availability Verified is true AND ALL 6 fields above are explicitly known and confirmed in the conversation, and tell the patient to review and click the "Confirm & Submit Request" card below.
 5. NEVER claim an appointment is already booked or confirmed, and NEVER invent a reference code like FC-1234. Explain that clicking Confirm submits a pending request for clinic confirmation.
 
 SAFETY & PRIVACY RULES (STRICT):
@@ -612,19 +739,32 @@ SAFETY & PRIVACY RULES (STRICT):
 2. NEVER ask for or claim access to private patient dental records.
 3. If the patient describes severe tooth pain, facial swelling, fever, uncontrolled bleeding, or trauma, set urgent=true, intent="urgent", advise calling the clinic immediately at ${ctx.phone || '+1 555 010 0000'} (or emergency services if breathing/swallowing is affected), and invite them to escalate to the front desk.`;
 
+  const MODEL_CHAIN = [
+    { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+  ] as const;
+  const ATTEMPT_TIMEOUT_MS = 10_000;
+  const startedAt = Date.now();
+  let usedModel: string = MODEL_CHAIN[0].model;
+
   try {
     let response: Awaited<ReturnType<typeof ai.models.generateContent>> | null = null;
     let lastErr: unknown = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < MODEL_CHAIN.length; attempt++) {
+      const { model: targetModel, thinkingLevel } = MODEL_CHAIN[attempt];
+      usedModel = targetModel;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error(`Gemini ${targetModel} timed out`)), ATTEMPT_TIMEOUT_MS);
       try {
-        response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+        const genPromise = ai.models.generateContent({
+          model: targetModel,
           contents: historyLines
             ? `Recent conversation:\n${historyLines}\n\nLatest patient message: ${message}`
             : message,
           config: {
+            abortSignal: controller.signal,
             systemInstruction,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            thinkingConfig: { thinkingLevel },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -682,25 +822,39 @@ SAFETY & PRIVACY RULES (STRICT):
             },
           },
         });
+
+        response = await Promise.race([
+          genPromise,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Gemini timeout after ${ATTEMPT_TIMEOUT_MS}ms`)), ATTEMPT_TIMEOUT_MS + 250)
+          ),
+        ]);
         break;
       } catch (err) {
         lastErr = err;
         const msg = err instanceof Error ? err.message : String(err);
         if (
-          attempt < 2 &&
+          attempt < MODEL_CHAIN.length - 1 &&
           (msg.includes('503') ||
             msg.includes('UNAVAILABLE') ||
             msg.includes('429') ||
-            msg.includes('RESOURCE_EXHAUSTED'))
+            msg.includes('RESOURCE_EXHAUSTED') ||
+            msg.includes('404') ||
+            msg.includes('NOT_FOUND') ||
+            msg.includes('timeout') ||
+            msg.includes('aborted'))
         ) {
-          await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+          await new Promise((r) => setTimeout(r, 300));
           continue;
         }
         throw err;
+      } finally {
+        clearTimeout(timer);
       }
     }
     if (!response) throw lastErr || new Error('Empty model response');
 
+    const latencyMs = Date.now() - startedAt;
     const rawText = (response.text ?? '').trim();
     const parsed = JSON.parse(rawText || '{}') as Record<string, unknown>;
 
@@ -738,6 +892,7 @@ SAFETY & PRIVACY RULES (STRICT):
 
     const bookingReady =
       allowChatbotBooking &&
+      availabilityVerified &&
       Boolean(parsed.bookingReadyToConfirm) &&
       Boolean(validServiceId && validDoctorId && validDate && validTime) &&
       draftName.length >= 2 &&
@@ -775,15 +930,108 @@ SAFETY & PRIVACY RULES (STRICT):
             notes: draftNotes,
           }
         : null,
+      model: usedModel,
+      latencyMs,
     });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error('Gemini /api/chat error:', msg);
+    const latencyMs = Date.now() - startedAt;
+    const rawMsg = error instanceof Error ? error.message : String(error);
+    const causeMsg =
+      error && typeof error === 'object' && 'cause' in error && (error as { cause?: unknown }).cause
+        ? String((error as { cause: unknown }).cause)
+        : '';
+    const statusProp =
+      error && typeof error === 'object' && 'status' in error
+        ? String((error as { status: unknown }).status)
+        : '';
+    const msg = `${rawMsg} ${causeMsg} ${statusProp}`.trim();
+    console.error(`Gemini /api/chat error (${latencyMs}ms):`, msg);
     const isQuota = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
-    res.status(isQuota ? 429 : 502).json({
+    const isTimeout = msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('abort');
+    const isAuthOrModel =
+      msg.includes('API_KEY_INVALID') ||
+      msg.includes('PERMISSION_DENIED') ||
+      msg.includes('403') ||
+      msg.includes('404') ||
+      msg.includes('NOT_FOUND') ||
+      msg.includes('INVALID_ARGUMENT') ||
+      msg.includes('400');
+
+    const statusCode = isQuota ? 429 : isTimeout ? 504 : 502;
+    const safeDiagnostic = msg
+      .replace(/AIza[0-9A-Za-z_-]+/g, '[REDACTED]')
+      .replace(/\s+/g, ' ')
+      .slice(0, 180);
+
+    res.status(statusCode).json({
       error: isQuota
         ? 'The AI receptionist is experiencing high demand right now. Please wait a few seconds and try again, or use the booking form.'
-        : 'Unable to reach the AI receptionist right now. Please try again or use the booking form.',
+        : isTimeout
+          ? 'The AI receptionist took too long to respond. Please try again or use the booking form directly.'
+          : isAuthOrModel
+            ? 'The AI receptionist service could not be reached due to model or API key configuration. Please use the booking form or contact form.'
+            : 'Unable to reach the AI receptionist right now. Please try again or use the booking form.',
+      errorType: isQuota ? 'quota' : isTimeout ? 'timeout' : isAuthOrModel ? 'config' : 'upstream',
+      diagnostic: safeDiagnostic,
+      latencyMs,
     });
   }
 }
+
+export async function handleGuestGate(req: ApiRequest, res: ApiResponse) {
+  applyApiSecurityHeaders(res);
+  if (req.method && req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const body = parseJsonBody<{ action?: unknown; hp?: unknown }>(req);
+  const action = body?.action === 'booking' || body?.action === 'inquiry' ? body.action : null;
+  if (!action) {
+    res.status(400).json({ allowed: false, error: 'Invalid guest gate action.' });
+    return;
+  }
+
+  if (typeof body?.hp === 'string' && body.hp.trim().length > 0) {
+    res.status(400).json({ allowed: false, error: 'Submission blocked by anti-spam filter.' });
+    return;
+  }
+
+  let uid: string | null = null;
+  const token = getBearerToken(req);
+  if (token) {
+    const projectId = ensureAdminApp();
+    if (projectId) {
+      try {
+        const decoded = await getAdminAuth(getApp()).verifyIdToken(token);
+        uid = decoded.uid;
+      } catch {
+        res.status(401).json({ allowed: false, error: 'Invalid authentication token.' });
+        return;
+      }
+    }
+  }
+
+  const ip = getClientIp(req);
+  const rateKey = uid ? `ip:${ip}:uid:${uid}` : `ip:${ip}`;
+  const rate = await checkDistributedGuestActionRateLimit(action, rateKey);
+  res.setHeader('X-RateLimit-Limit', String(rate.limit));
+  res.setHeader('X-RateLimit-Remaining', String(rate.remaining));
+
+  if (!rate.allowed) {
+    res.setHeader('Retry-After', String(rate.retryAfterSec));
+    res.status(429).json({
+      allowed: false,
+      error: `Too many ${action} requests from your session. Please wait ${rate.retryAfterSec} seconds and try again.`,
+    });
+    return;
+  }
+
+  res.json({
+    allowed: true,
+    action,
+    remaining: rate.remaining,
+    backend: rate.backend,
+  });
+}
+

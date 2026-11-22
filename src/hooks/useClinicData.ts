@@ -12,24 +12,58 @@ import {
   SAMPLE_DOCTORS,
   SAMPLE_SERVICES,
 } from '../data/sampleSeed';
-import { db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
+  BusySlot,
   ClinicSettings,
   Doctor,
   ScheduleOverride,
   ServiceItem,
-  SlotLock,
 } from '../types/clinic';
 
 export interface ClinicCatalogState {
   doctors: Doctor[];
   services: ServiceItem[];
   schedules: ScheduleOverride[];
-  slotLocks: SlotLock[];
+  slotLocks: BusySlot[];
   settings: ClinicSettings;
   catalogSeeded: boolean;
   loading: boolean;
+  availabilityVerified: boolean;
+  availabilityLoading: boolean;
+  availabilityError: string | null;
+  retryAvailability: () => void;
   initializeCatalog: () => Promise<void>;
+}
+
+function logAvailabilityDiagnostic(err: unknown, path: string) {
+  const errInfo = {
+    error: err instanceof Error ? err.message : String(err),
+    operationType: OperationType.LIST,
+    path,
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+  };
+  console.error('Firestore availability error: ', JSON.stringify(errInfo));
+}
+
+function formatAvailabilityListenerError(err: unknown, target: 'busySlots' | 'schedules'): string {
+  const code =
+    err && typeof err === 'object' && 'code' in err && typeof (err as { code: unknown }).code === 'string'
+      ? (err as { code: string }).code
+      : '';
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = `${code} ${msg}`.toLowerCase();
+  if (lower.includes('permission-denied') || lower.includes('insufficient')) {
+    return target === 'busySlots'
+      ? 'Live slot availability could not be verified from Firestore (missing busySlots read permission). Publish the updated firestore.rules before accepting bookings.'
+      : 'Doctor schedule overrides could not be verified from Firestore (missing schedules read permission). Publish the updated firestore.rules before accepting bookings.';
+  }
+  return 'Live appointment availability could not be verified from Firestore right now. Booking is blocked until availability is confirmed.';
 }
 
 export function useClinicData(): ClinicCatalogState {
@@ -37,14 +71,26 @@ export function useClinicData(): ClinicCatalogState {
   const [fsDoctors, setFsDoctors] = useState<Doctor[]>([]);
   const [fsServices, setFsServices] = useState<ServiceItem[]>([]);
   const [schedules, setSchedules] = useState<ScheduleOverride[]>([]);
-  const [slotLocks, setSlotLocks] = useState<SlotLock[]>([]);
+  const [slotLocks, setSlotLocks] = useState<BusySlot[]>([]);
   const [fsSettings, setFsSettings] = useState<ClinicSettings | null>(null);
   const [loadedFlags, setLoadedFlags] = useState({
     doctors: false,
     services: false,
+    schedules: false,
+    busySlots: false,
     settings: false,
   });
+  const [busySlotsError, setBusySlotsError] = useState<string | null>(null);
+  const [schedulesError, setSchedulesError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
   const seededTriggered = useRef(false);
+
+  const retryAvailability = useCallback(() => {
+    setBusySlotsError(null);
+    setSchedulesError(null);
+    setLoadedFlags((f) => ({ ...f, schedules: false, busySlots: false }));
+    setRetryNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     const unsubDocs = onSnapshot(
@@ -72,16 +118,30 @@ export function useClinicData(): ClinicCatalogState {
       collection(db, 'schedules'),
       (snap) => {
         setSchedules(snap.docs.map((d) => d.data() as ScheduleOverride));
+        setSchedulesError(null);
+        setLoadedFlags((f) => ({ ...f, schedules: true }));
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'schedules')
+      (err) => {
+        logAvailabilityDiagnostic(err, 'schedules');
+        setSchedules([]);
+        setLoadedFlags((f) => ({ ...f, schedules: false }));
+        setSchedulesError(formatAvailabilityListenerError(err, 'schedules'));
+      }
     );
 
     const unsubLocks = onSnapshot(
-      collection(db, 'slotLocks'),
+      collection(db, 'busySlots'),
       (snap) => {
-        setSlotLocks(snap.docs.map((d) => d.data() as SlotLock));
+        setSlotLocks(snap.docs.map((d) => d.data() as BusySlot));
+        setBusySlotsError(null);
+        setLoadedFlags((f) => ({ ...f, busySlots: true }));
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'slotLocks')
+      (err) => {
+        logAvailabilityDiagnostic(err, 'busySlots');
+        setSlotLocks([]);
+        setLoadedFlags((f) => ({ ...f, busySlots: false }));
+        setBusySlotsError(formatAvailabilityListenerError(err, 'busySlots'));
+      }
     );
 
     const unsubSettings = onSnapshot(
@@ -100,7 +160,7 @@ export function useClinicData(): ClinicCatalogState {
       unsubLocks();
       unsubSettings();
     };
-  }, []);
+  }, [retryNonce]);
 
   const initializeCatalog = useCallback(async () => {
     try {
@@ -175,6 +235,15 @@ export function useClinicData(): ClinicCatalogState {
   const services = fsServices.length > 0 ? fsServices : SAMPLE_SERVICES;
   const settings = fsSettings || DEFAULT_CLINIC_SETTINGS;
   const loading = !(loadedFlags.doctors && loadedFlags.services && loadedFlags.settings);
+  const availabilityError = busySlotsError || schedulesError || null;
+  const availabilityVerified =
+    !availabilityError &&
+    loadedFlags.doctors &&
+    loadedFlags.services &&
+    loadedFlags.settings &&
+    loadedFlags.schedules &&
+    loadedFlags.busySlots;
+  const availabilityLoading = !availabilityError && !availabilityVerified;
 
   return {
     doctors,
@@ -184,6 +253,10 @@ export function useClinicData(): ClinicCatalogState {
     settings,
     catalogSeeded,
     loading,
+    availabilityVerified,
+    availabilityLoading,
+    availabilityError,
+    retryAvailability,
     initializeCatalog,
   };
 }

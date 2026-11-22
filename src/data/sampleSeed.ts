@@ -221,24 +221,24 @@ export const SAMPLE_REVIEWS = [
 
 export const CLINIC_FAQS = [
   {
-    q: 'Do you accept dental insurance?',
-    a: 'Yes — we work with most major PPO dental plans and provide itemized receipts for reimbursement. Share your plan name via the assistant or booking notes and our front desk will verify your benefits before your visit.',
+    q: 'Are the insurance plans and pricing shown real?',
+    a: 'FourClinic is a fictional dental clinic portfolio demonstration. The PPO insurance marquee and fee ranges are realistic sample data for demonstrating booking and pricing UX.',
   },
   {
-    q: 'How are final treatment prices confirmed?',
-    a: 'We publish clear price ranges upfront for every treatment. After your examination and any needed digital X-rays, your dentist provides a written, itemized treatment plan before any procedure begins.',
+    q: 'How are visit durations and fees shown?',
+    a: 'Every sample treatment displays an estimated duration (30–90 minutes) and illustrative fee range upfront. Selecting a service pre-fills the booking form with matching doctor availability.',
   },
   {
-    q: 'Can I request a specific dentist or reschedule later?',
-    a: 'Yes! You can pick a preferred specialist when booking or choose "First available". Signed-in patients can view live status updates and cancel or reschedule upcoming visits directly on the site.',
+    q: 'Can I request a specific dentist or manage my booking later?',
+    a: 'Yes! You can pick a preferred specialist or choose "No preference — first available", and track or update upcoming requests on the My Visits page.',
   },
   {
-    q: 'What should I do for sudden tooth pain or swelling?',
-    a: 'Message our AI assistant or call the clinic directly — urgent pain and swelling flags are prioritized for same-day triage during clinic hours. For severe facial swelling, trouble breathing, or uncontrolled bleeding, call local emergency services immediately.',
+    q: 'What should I do for real sudden tooth pain or swelling?',
+    a: 'Because FourClinic is a demo application, do not rely on it for real medical care. For real urgent dental pain, severe swelling, trouble breathing, or bleeding, contact a licensed dentist or local emergency services immediately.',
   },
   {
-    q: 'Are payment plans available for braces or implants?',
-    a: 'Treatments over $500 can be split into 0% interest monthly installments agreed in writing prior to starting, with no credit-card surcharge.',
+    q: 'Does the AI assistant store my medical records?',
+    a: 'No. The assistant provides general non-diagnostic clinic info and scheduling assistance only. Do not share sensitive medical history or government IDs in chat.',
   },
 ];
 

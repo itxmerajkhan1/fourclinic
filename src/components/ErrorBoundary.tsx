@@ -30,19 +30,24 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#f4f8f8] flex items-center justify-center p-6">
-          <div className="max-w-lg w-full bg-white border border-[#e3ebec] rounded-2xl p-6 shadow-sm">
-            <h1 className="text-xl font-extrabold text-[#12262e]">Something went wrong</h1>
-            <p className="mt-2 text-sm text-[#42565c]">{this.state.message}</p>
+        <div className="min-h-screen bg-[#F7F5F0] flex items-center justify-center p-6">
+          <div className="max-w-lg w-full bg-white border border-[#D8DFD9] rounded-xl p-8">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#426F77]">
+              FourClinic System Notice
+            </p>
+            <h1 className="mt-2 font-editorial text-3xl text-[#102E34]">
+              Something interrupted this view
+            </h1>
+            <p className="mt-3 text-sm text-[#3B5257] leading-relaxed">{this.state.message}</p>
             {this.state.details && (
-              <pre className="mt-4 p-3 rounded-xl bg-[#f7fafb] border border-[#e3ebec] text-xs overflow-auto max-h-48 text-[#12262e]">
+              <pre className="mt-4 p-3.5 rounded-lg bg-[#F7F5F0] border border-[#D8DFD9] text-xs font-mono overflow-auto max-h-48 text-[#102E34]">
                 {this.state.details}
               </pre>
             )}
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="mt-5 px-4 py-2.5 rounded-full bg-[#4d8a96] text-white text-sm font-bold hover:bg-[#3d7280] cursor-pointer"
+              className="mt-6 px-5 py-2.5 rounded-lg bg-[#102E34] text-white text-sm font-semibold hover:bg-[#194149] transition cursor-pointer"
             >
               Reload application
             </button>

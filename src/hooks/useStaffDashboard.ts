@@ -13,7 +13,14 @@ import {
 } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
-import { addDaysIso, getCoveredLockIds, getCoveredTimes, sanitizeId, todayIso } from '../lib/validation';
+import {
+  addDaysIso,
+  getCoveredLockIds,
+  getCoveredTimes,
+  parseIsoDate,
+  sanitizeId,
+  todayIso,
+} from '../lib/validation';
 import type {
   AuditLog,
   ClinicSettings,
@@ -28,8 +35,25 @@ import type {
   UserRole,
 } from '../types/clinic';
 
+function toMillis(val: unknown): number {
+  if (!val) return 0;
+  if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+  if (typeof val === 'string') {
+    const ms = Date.parse(val);
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  if (typeof val === 'object') {
+    const obj = val as { toMillis?: () => number; seconds?: number; nanoseconds?: number };
+    if (typeof obj.toMillis === 'function') return obj.toMillis();
+    if (typeof obj.seconds === 'number') {
+      return obj.seconds * 1000 + Math.floor((obj.nanoseconds || 0) / 1_000_000);
+    }
+  }
+  return 0;
+}
+
 export function useStaffDashboard() {
-  const { user, role, authReady } = useAuth();
+  const { user, role, authReady, ensureGuestSession } = useAuth();
   const [inquiries, setInquiries] = useState<Inquiry[]>([]);
   const [patients, setPatients] = useState<PatientRecord[]>([]);
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
@@ -52,8 +76,8 @@ export function useStaffDashboard() {
 
     const unsubs: Array<() => void> = [];
 
-    // Inquiries: Admin/Receptionist see all; patients see their own
-    if (isAdminOrRecep || role === 'patient') {
+    // Inquiries: Admin/Receptionist see all; patients and anonymous guests see their own
+    if (isAdminOrRecep || role === 'patient' || user.isAnonymous) {
       const inqQuery = isAdminOrRecep
         ? query(collection(db, 'inquiries'))
         : query(collection(db, 'inquiries'), where('patientUid', '==', user.uid));
@@ -64,9 +88,8 @@ export function useStaffDashboard() {
             const list = snap.docs
               .map((d) => d.data() as Inquiry)
               .sort((a, b) => {
-                const ta = typeof a.createdAt === 'string' ? a.createdAt : '';
-                const tb = typeof b.createdAt === 'string' ? b.createdAt : '';
-                return tb.localeCompare(ta);
+                const diff = toMillis(b.createdAt) - toMillis(a.createdAt);
+                return diff !== 0 ? diff : b.id.localeCompare(a.id);
               });
             setInquiries(list);
           },
@@ -110,7 +133,10 @@ export function useStaffDashboard() {
           (snap) => {
             const logs = snap.docs
               .map((d) => d.data() as AuditLog)
-              .sort((a, b) => b.id.localeCompare(a.id));
+              .sort((a, b) => {
+                const diff = toMillis(b.createdAt) - toMillis(a.createdAt);
+                return diff !== 0 ? diff : b.id.localeCompare(a.id);
+              });
             setAuditLogs(logs);
           },
           (err) => handleFirestoreError(err, OperationType.LIST, 'auditLogs')
@@ -154,18 +180,55 @@ export function useStaffDashboard() {
     message: string;
     channel: 'website' | 'chatbot';
     priority?: InquiryPriority;
+    honeypot?: string;
   }): Promise<Inquiry> {
-    if (!user) {
-      throw new Error('Please sign in with Google to send a message so we can track replies.');
+    const cleanName = input.name.trim();
+    const cleanContact = input.contact.trim();
+    const cleanMessage = input.message.trim();
+    if (cleanName.length < 2 || /\d/.test(cleanName)) {
+      throw new Error('Please enter a valid name (2+ characters, no digits).');
     }
+    if (cleanContact.length < 5) {
+      throw new Error('Please provide a valid phone number or email address.');
+    }
+    if (cleanMessage.length < 5) {
+      throw new Error('Please write a message of at least 5 characters.');
+    }
+
+    const activeUser = user || (await ensureGuestSession());
+    const isStaffCreator = !activeUser.isAnonymous && isAdminOrRecep;
+
+    if (!isStaffCreator) {
+      const idToken = await activeUser.getIdToken();
+      const gateRes = await fetch('/api/guest/gate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          action: 'inquiry',
+          hp: input.honeypot || '',
+        }),
+      });
+      if (!gateRes.ok) {
+        const errBody = (await gateRes.json().catch(() => ({}))) as { error?: string };
+        throw new Error(
+          errBody.error || 'Too many inquiries sent recently. Please wait a moment and try again.'
+        );
+      }
+    }
+
     const id = `inq_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const referenceCode = `INQ-${Math.floor(1000 + Math.random() * 9000)}`;
     const nowIso = new Date().toISOString();
     const record: Omit<Inquiry, 'createdAt' | 'updatedAt'> = {
       id,
-      patientUid: user.uid,
+      referenceCode,
+      patientUid: activeUser.uid,
       channel: input.channel,
-      name: input.name.trim().slice(0, 80),
-      contact: input.contact.trim().slice(0, 120),
+      name: cleanName.slice(0, 80),
+      contact: cleanContact.slice(0, 120),
       topic: (input.topic || 'general').slice(0, 40),
       status: 'new',
       priority: input.priority || 'normal',
@@ -175,7 +238,7 @@ export function useStaffDashboard() {
       messages: [
         {
           from: 'user',
-          text: input.message.trim().slice(0, 500),
+          text: cleanMessage.slice(0, 500),
           ts: nowIso,
         },
       ],
@@ -411,12 +474,16 @@ export function useStaffDashboard() {
     if (role !== 'admin' || !user) throw new Error('Admin permission required.');
     const t0 = todayIso();
     let d1 = addDaysIso(t0, 1);
-    if (new Date(d1).getDay() === 0) d1 = addDaysIso(d1, 1);
+    if (parseIsoDate(d1).getDay() === 0) d1 = addDaysIso(d1, 1);
     let d2 = addDaysIso(t0, 2);
-    if (new Date(d2).getDay() === 0) d2 = addDaysIso(d2, 1);
+    if (parseIsoDate(d2).getDay() === 0) d2 = addDaysIso(d2, 1);
+    if (d2 === d1) d2 = addDaysIso(d1, 1);
 
-    const batch = writeBatch(db);
+    const batch1 = writeBatch(db);
     const now = serverTimestamp();
+
+    const sampleTime1 = slotDurationMins === 45 ? '09:45' : '10:00';
+    const sampleTime2 = slotDurationMins === 45 ? '10:30' : '11:00';
 
     const sampleAppts = [
       {
@@ -430,14 +497,14 @@ export function useStaffDashboard() {
         doctorId: 'd1',
         doctorName: 'Dr. Maya Okafor',
         date: d1,
-        time: '10:00',
+        time: sampleTime1,
         durationMins: 60,
         estimatedValue: 240,
         status: 'pending',
         source: 'chatbot',
         notes: 'Fictional sample pending booking for testing confirmation workflow.',
         staffNotes: '',
-        slotLockIds: getCoveredLockIds('d1', d1, '10:00', 60, slotDurationMins),
+        slotLockIds: getCoveredLockIds('d1', d1, sampleTime1, 60, slotDurationMins),
         isSample: true,
       },
       {
@@ -451,14 +518,14 @@ export function useStaffDashboard() {
         doctorId: 'd2',
         doctorName: 'Dr. Daniel Reyes',
         date: d2,
-        time: '11:00',
+        time: sampleTime2,
         durationMins: 45,
         estimatedValue: 1800,
         status: 'confirmed',
         source: 'form',
         notes: 'Fictional sample confirmed orthodontic assessment.',
         staffNotes: 'Verified PPO coverage.',
-        slotLockIds: getCoveredLockIds('d2', d2, '11:00', 45, slotDurationMins),
+        slotLockIds: getCoveredLockIds('d2', d2, sampleTime2, 45, slotDurationMins),
         isSample: true,
       },
       {
@@ -485,7 +552,7 @@ export function useStaffDashboard() {
     ];
 
     sampleAppts.forEach((a) => {
-      batch.set(doc(db, 'appointments', a.id), {
+      batch1.set(doc(db, 'appointments', a.id), {
         ...a,
         slotLockId: a.slotLockIds[0],
         createdAt: now,
@@ -494,7 +561,7 @@ export function useStaffDashboard() {
       if (a.status === 'pending' || a.status === 'confirmed') {
         const coveredTimes = getCoveredTimes(a.time, a.durationMins, slotDurationMins);
         a.slotLockIds.forEach((lockId, idx) => {
-          batch.set(doc(db, 'slotLocks', lockId), {
+          batch1.set(doc(db, 'slotLocks', lockId), {
             doctorId: a.doctorId,
             date: a.date,
             time: coveredTimes[idx],
@@ -502,10 +569,17 @@ export function useStaffDashboard() {
             bookedByUid: user.uid,
             createdAt: now,
           });
+          batch1.set(doc(db, 'busySlots', lockId), {
+            doctorId: a.doctorId,
+            date: a.date,
+            time: coveredTimes[idx],
+            createdAt: now,
+          });
         });
       }
     });
 
+    const batch2 = writeBatch(db);
     const samplePatients = [
       {
         id: 'sample_pt_1',
@@ -527,7 +601,7 @@ export function useStaffDashboard() {
       },
     ];
     samplePatients.forEach((p) => {
-      batch.set(doc(db, 'patients', p.id), { ...p, createdAt: now, updatedAt: now });
+      batch2.set(doc(db, 'patients', p.id), { ...p, createdAt: now, updatedAt: now });
     });
 
     const sampleInquiries = [
@@ -580,11 +654,11 @@ export function useStaffDashboard() {
       },
     ];
     sampleInquiries.forEach((q) => {
-      batch.set(doc(db, 'inquiries', q.id), { ...q, createdAt: now, updatedAt: now });
+      batch2.set(doc(db, 'inquiries', q.id), { ...q, createdAt: now, updatedAt: now });
     });
 
     const auditId = `log_${Date.now().toString(36)}_seed`;
-    batch.set(doc(db, 'auditLogs', auditId), {
+    batch2.set(doc(db, 'auditLogs', auditId), {
       id: auditId,
       actorUid: user.uid,
       actorEmail: user.email || 'admin',
@@ -597,7 +671,8 @@ export function useStaffDashboard() {
     });
 
     try {
-      await batch.commit();
+      await batch1.commit();
+      await batch2.commit();
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'sample_seed');
     }

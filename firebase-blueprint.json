@@ -80,9 +80,21 @@
       },
       "required": ["id", "doctorId", "date", "isBlockedDay", "blockedSlots", "reason", "createdByUid", "createdAt", "updatedAt"]
     },
+    "BusySlot": {
+      "title": "BusySlot",
+      "description": "Public non-PII occupied calendar slot indicator containing zero user or appointment identifiers.",
+      "type": "object",
+      "properties": {
+        "doctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$", "maxLength": 5 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["doctorId", "date", "time", "createdAt"]
+    },
     "SlotLock": {
       "title": "SlotLock",
-      "description": "Non-PII atomic reservation lock preventing double-bookings per doctor, date, and time.",
+      "description": "Private owner/staff atomic reservation lock preventing double-bookings per doctor, date, and time.",
       "type": "object",
       "properties": {
         "doctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -119,11 +131,33 @@
         "staffNotes": { "type": "string", "maxLength": 400 },
         "slotLockId": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "slotLockIds": { "type": "array" },
+        "guestTokenHash": { "type": "string", "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
         "isSample": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "referenceCode", "patientUid", "patientName", "patientPhone", "serviceId", "serviceName", "doctorId", "doctorName", "date", "time", "durationMins", "estimatedValue", "status", "source", "notes", "staffNotes", "slotLockId", "slotLockIds", "isSample", "createdAt", "updatedAt"]
+    },
+    "VisitLookup": {
+      "title": "VisitLookup",
+      "description": "Non-PII cross-device appointment status summary keyed by SHA-256 hash of a non-guessable guest secret.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "appointmentId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referenceCode": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "serviceName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "doctorId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "doctorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$", "maxLength": 5 },
+        "durationMins": { "type": "integer" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "completed", "cancelled", "no_show"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "appointmentId", "ownerUid", "referenceCode", "serviceName", "doctorId", "doctorName", "date", "time", "durationMins", "status", "createdAt", "updatedAt"]
     },
     "Patient": {
       "title": "Patient",
@@ -151,6 +185,7 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referenceCode": { "type": "string", "minLength": 4, "maxLength": 20 },
         "patientUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "channel": { "type": "string", "enum": ["website", "chatbot", "whatsapp", "phone"] },
         "name": { "type": "string", "minLength": 2, "maxLength": 80 },
@@ -227,13 +262,21 @@
       "schema": { "$ref": "#/entities/Schedule" },
       "description": "Doctor leave and blocked time-slot overrides."
     },
+    "/busySlots/{lockId}": {
+      "schema": { "$ref": "#/entities/BusySlot" },
+      "description": "Public non-PII occupied calendar slots containing only doctorId, date, time, and createdAt."
+    },
     "/slotLocks/{lockId}": {
       "schema": { "$ref": "#/entities/SlotLock" },
-      "description": "Non-PII atomic slot locks preventing duplicate doctor/date/time bookings."
+      "description": "Private owner/staff atomic slot locks preventing duplicate doctor/date/time bookings."
     },
     "/appointments/{appointmentId}": {
       "schema": { "$ref": "#/entities/Appointment" },
       "description": "Appointment records accessible only to owning patient or authorized staff."
+    },
+    "/visitLookups/{tokenHash}": {
+      "schema": { "$ref": "#/entities/VisitLookup" },
+      "description": "Non-PII appointment status lookup keyed by SHA-256 hash of a non-guessable guest secret."
     },
     "/patients/{patientId}": {
       "schema": { "$ref": "#/entities/Patient" },

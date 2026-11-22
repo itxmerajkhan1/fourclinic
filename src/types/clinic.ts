@@ -74,6 +74,13 @@ export interface ScheduleOverride {
   updatedAt?: Timestamp | string;
 }
 
+export interface BusySlot {
+  doctorId: string;
+  date: string;
+  time: string;
+  createdAt?: Timestamp | string;
+}
+
 export interface SlotLock {
   doctorId: string;
   date: string;
@@ -119,7 +126,24 @@ export interface Appointment {
   staffNotes: string;
   slotLockId: string;
   slotLockIds: string[];
+  guestTokenHash?: string;
   isSample: boolean;
+  createdAt?: Timestamp | string;
+  updatedAt?: Timestamp | string;
+}
+
+export interface VisitLookup {
+  id: string;
+  appointmentId: string;
+  ownerUid: string;
+  referenceCode: string;
+  serviceName: string;
+  doctorId: string;
+  doctorName: string;
+  date: string;
+  time: string;
+  durationMins: number;
+  status: AppointmentStatus;
   createdAt?: Timestamp | string;
   updatedAt?: Timestamp | string;
 }
@@ -151,6 +175,7 @@ export interface InquiryMessage {
 
 export interface Inquiry {
   id: string;
+  referenceCode?: string;
   patientUid: string;
   channel: InquiryChannel;
   name: string;

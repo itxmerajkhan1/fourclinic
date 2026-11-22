@@ -5,12 +5,13 @@ import {
   CalendarPlus,
   CheckCircle2,
   Download,
-  LogIn,
   MessageCircle,
+  RotateCcw,
   Send,
   X,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import type { BookedAppointmentResult } from '../../hooks/useAppointments';
 import { downloadAppointmentIcs } from '../../lib/ics';
 import {
   addDaysIso,
@@ -21,15 +22,14 @@ import {
   todayIso,
 } from '../../lib/validation';
 import type {
-  Appointment,
   AppointmentSource,
+  BusySlot,
   ClinicSettings,
   Doctor,
   Inquiry,
   InquiryPriority,
   ScheduleOverride,
   ServiceItem,
-  SlotLock,
 } from '../../types/clinic';
 
 interface BookingDraft {
@@ -53,7 +53,51 @@ interface ChatMessage {
   suggestedDate?: string;
   suggestedTime?: string;
   bookingDraft?: BookingDraft | null;
-  confirmedAppointment?: Appointment;
+  confirmedAppointment?: BookedAppointmentResult;
+}
+
+const CHAT_STORAGE_KEY = 'fc_chat_history_v1';
+
+const WELCOME_MESSAGE: ChatMessage = {
+  id: 'welcome',
+  role: 'assistant',
+  text: 'Welcome to FourClinic. Ask about sample treatments, fee estimates, clinic hours, or open appointment slots in English, اردو, or Roman Urdu. (Automated demo assistant — please do not share sensitive medical history.)',
+};
+
+function sanitizeMessagesForSessionStorage(msgs: ChatMessage[]): ChatMessage[] {
+  return msgs
+    .slice(-16)
+    .filter((m) => !m.urgent)
+    .map((m) => ({
+      id: m.id,
+      role: m.role,
+      text: m.text.replace(/\+?\d[\d\s()-]{6,}\d/g, '[redacted]'),
+      suggestedServiceId: m.suggestedServiceId,
+      suggestedDoctorId: m.suggestedDoctorId,
+      suggestedDate: m.suggestedDate,
+      suggestedTime: m.suggestedTime,
+    }));
+}
+
+function loadStoredChatMessages(): ChatMessage[] {
+  if (typeof window === 'undefined') return [WELCOME_MESSAGE];
+  try {
+    const raw = window.sessionStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return [WELCOME_MESSAGE];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return [WELCOME_MESSAGE];
+    const valid = parsed.filter(
+      (m): m is ChatMessage =>
+        Boolean(m) &&
+        typeof m === 'object' &&
+        (m.role === 'user' || m.role === 'assistant') &&
+        typeof m.text === 'string' &&
+        typeof m.id === 'string'
+    );
+    return valid.length > 0 ? valid.slice(-16) : [WELCOME_MESSAGE];
+  } catch {
+    return [WELCOME_MESSAGE];
+  }
 }
 
 interface ChatWidgetProps {
@@ -62,9 +106,11 @@ interface ChatWidgetProps {
   doctors: Doctor[];
   services: ServiceItem[];
   schedules: ScheduleOverride[];
-  slotLocks: SlotLock[];
+  slotLocks: BusySlot[];
   settings: ClinicSettings;
   catalogSeeded: boolean;
+  availabilityVerified?: boolean;
+  availabilityError?: string | null;
   onBookAppointment: (input: {
     patientName: string;
     patientPhone: string;
@@ -75,7 +121,7 @@ interface ChatWidgetProps {
     time: string;
     notes: string;
     source: AppointmentSource;
-  }) => Promise<Appointment>;
+  }) => Promise<BookedAppointmentResult>;
   onPrefillBooking: (serviceId: string, doctorId: string, date: string) => void;
   onEscalateInquiry: (input: {
     name: string;
@@ -97,22 +143,19 @@ export function ChatWidget({
   slotLocks,
   settings,
   catalogSeeded,
+  availabilityVerified = true,
+  availabilityError = null,
   onBookAppointment,
   onPrefillBooking,
   onEscalateInquiry,
   onToast,
 }: ChatWidgetProps) {
-  const { user, signingIn, signInWithGoogle } = useAuth();
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      text: 'Hi! Ask me about dental treatments, pricing, hours, or open slots — or tell me what visit you want to book in English, Urdu (اردو), or Roman Urdu.',
-    },
-  ]);
+  const { user } = useAuth();
+  const [messages, setMessages] = useState<ChatMessage[]>(() => loadStoredChatMessages());
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [confirmingMsgId, setConfirmingMsgId] = useState<string | null>(null);
+  const [escalateName, setEscalateName] = useState('');
   const [escalateContact, setEscalateContact] = useState('');
   const [showEscalateBox, setShowEscalateBox] = useState(false);
   const [escalateUrgent, setEscalateUrgent] = useState(false);
@@ -121,6 +164,32 @@ export function ChatWidget({
   const [lastSuggestedServiceId, setLastSuggestedServiceId] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const safe = sanitizeMessagesForSessionStorage(messages);
+      window.sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(safe));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [messages]);
+
+  function handleClearChat() {
+    setMessages([WELCOME_MESSAGE]);
+    setShowEscalateBox(false);
+    setEscalateUrgent(false);
+    setLastUserMsg('');
+    setLastSuggestedServiceId('');
+    if (typeof window !== 'undefined') {
+      try {
+        window.sessionStorage.removeItem(CHAT_STORAGE_KEY);
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    onToast('Chat history cleared.');
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -158,6 +227,7 @@ export function ChatWidget({
   }, [settings]);
 
   const upcomingSlotsSummary = useMemo(() => {
+    if (!availabilityVerified || availabilityError) return [];
     const activeDocs = doctors.filter((d) => d.active);
     const activeSvc = services.find((s) => s.id === lastSuggestedServiceId && s.active);
     const durationMins = activeSvc?.durationMins || settings.slotDurationMins;
@@ -185,7 +255,7 @@ export function ChatWidget({
       });
     }
     return out.slice(0, 14);
-  }, [doctors, services, lastSuggestedServiceId, schedules, slotLocks, settings]);
+  }, [availabilityVerified, availabilityError, doctors, services, lastSuggestedServiceId, schedules, slotLocks, settings]);
 
   function scrollBottom() {
     setTimeout(() => {
@@ -228,6 +298,7 @@ export function ChatWidget({
             email: settings.email,
             hoursSummary,
             allowChatbotBooking: settings.allowChatbotBooking,
+            availabilityVerified,
             services: services
               .filter((s) => s.active)
               .map((s) => ({
@@ -293,12 +364,17 @@ export function ChatWidget({
   }
 
   async function handleConfirmDraftBooking(msgId: string, draft: BookingDraft) {
-    if (!user) {
-      await signInWithGoogle();
+    if (availabilityError || !availabilityVerified) {
+      onToast(
+        availabilityError ||
+          'Live slot availability could not be verified. Booking via chat is paused.'
+      );
       return;
     }
     if (!catalogSeeded) {
-      onToast('Clinic catalog is still in preview mode. Please use the booking form after Admin setup.');
+      onToast(
+        'Clinic catalog is still in preview mode. Please use the booking form after Admin setup.'
+      );
       return;
     }
     setConfirmingMsgId(msgId);
@@ -306,7 +382,7 @@ export function ChatWidget({
       const created = await onBookAppointment({
         patientName: draft.patientName,
         patientPhone: draft.patientPhone,
-        patientEmail: user.email || undefined,
+        patientEmail: user && !user.isAnonymous ? user.email || undefined : undefined,
         serviceId: draft.serviceId,
         doctorId: draft.doctorId,
         date: draft.date,
@@ -315,11 +391,7 @@ export function ChatWidget({
         source: 'chatbot',
       });
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === msgId
-            ? { ...m, confirmedAppointment: created }
-            : m
-        )
+        prev.map((m) => (m.id === msgId ? { ...m, confirmedAppointment: created } : m))
       );
       onToast(`Request ${created.referenceCode} submitted via AI assistant!`);
     } catch (err) {
@@ -344,8 +416,13 @@ export function ChatWidget({
 
   async function handleEscalateSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!user) {
-      await signInWithGoogle();
+    const resolvedName = (
+      escalateName.trim() ||
+      (user && !user.isAnonymous ? user.displayName : '') ||
+      'Chat Visitor'
+    ).slice(0, 80);
+    if (resolvedName.length < 2 || /\d/.test(resolvedName)) {
+      onToast('Please enter a valid name (2+ letters, no digits).');
       return;
     }
     if (escalateContact.trim().length < 5) {
@@ -354,8 +431,8 @@ export function ChatWidget({
     }
     setEscalatingBusy(true);
     try {
-      await onEscalateInquiry({
-        name: user.displayName || 'Chat Visitor',
+      const created = await onEscalateInquiry({
+        name: resolvedName,
         contact: escalateContact.trim(),
         topic: escalateUrgent ? 'urgent' : 'chatbot',
         message: lastUserMsg || 'Requested front-desk callback from AI chat.',
@@ -363,18 +440,19 @@ export function ChatWidget({
         priority: escalateUrgent ? 'urgent' : 'normal',
       });
       setShowEscalateBox(false);
+      setEscalateName('');
       setEscalateContact('');
       setMessages((prev) => [
         ...prev,
         {
           id: `esc_ok_${Date.now()}`,
           role: 'assistant',
-          text: 'Your message has been sent to our front-desk queue. A team member will follow up with you shortly.',
+          text: `Your message (${created.referenceCode || created.id}) has been queued for our front desk. No human has replied yet; a team member reviews messages during clinic hours.`,
         },
       ]);
-      onToast('Sent to our front desk Inquiries queue!');
+      onToast(`Sent inquiry ${created.referenceCode || ''} to our front desk queue.`);
     } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to send to front desk.');
+      onToast(formatUserFriendlyError(err, 'Failed to send to front desk.'));
     } finally {
       setEscalatingBusy(false);
       scrollBottom();
@@ -382,59 +460,79 @@ export function ChatWidget({
   }
 
   return (
-    <div className="fixed bottom-3 right-3 sm:bottom-5 sm:right-5 z-50">
+    <div className={open ? 'fixed inset-0 sm:inset-auto sm:bottom-5 sm:right-5 z-50' : 'fixed bottom-4 right-4 sm:bottom-5 sm:right-5 z-50'}>
       {!open ? (
         <button
           type="button"
           onClick={() => onToggle(true)}
           aria-label="Open FourClinic AI Assistant"
-          className="inline-flex items-center gap-2.5 px-4 sm:px-5 py-3 sm:py-3.5 rounded-full bg-[#4d8a96] text-white font-extrabold text-sm shadow-2xl hover:bg-[#3d7280] transition cursor-pointer"
+          className="inline-flex items-center gap-2.5 px-4 sm:px-5 py-3 rounded-lg bg-[#102E34] text-[#F7F5F0] border border-[#426F77] font-semibold text-xs sm:text-sm shadow-xl hover:bg-[#194149] transition cursor-pointer"
         >
-          <MessageCircle className="w-5 h-5" />
-          <span>Ask FourClinic AI</span>
+          <span className="w-2 h-2 rounded-full bg-[#C7775F]" />
+          <MessageCircle className="w-4 h-4" />
+          <span>Ask AI Receptionist</span>
         </button>
       ) : (
         <div
           role="dialog"
           aria-modal="true"
           aria-label="FourClinic AI Assistant"
-          className="w-[min(410px,calc(100vw-24px))] h-[min(560px,82vh)] bg-white rounded-3xl shadow-2xl border border-[#cfdee1] flex flex-col overflow-hidden"
+          className="w-full h-full sm:w-[420px] sm:h-[600px] sm:max-h-[calc(100dvh-40px)] bg-white sm:rounded-lg shadow-2xl border border-[#D8DFD9] flex flex-col overflow-hidden"
         >
-          <div className="px-4 py-3.5 bg-[#4d8a96] text-white flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <span className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center font-extrabold">
-                F
-              </span>
-              <div>
-                <b className="block text-sm font-extrabold">FourClinic AI Receptionist</b>
-                <small className="text-[11px] text-white/85">
-                  English · اردو · Roman Urdu (Non-diagnostic)
-                </small>
-              </div>
+          <div className="px-4 py-3.5 bg-[#102E34] text-[#F7F5F0] flex items-center justify-between shrink-0">
+            <div className="min-w-0">
+              <b className="block font-editorial text-[22px] font-normal leading-none truncate">
+                FourClinic Receptionist
+              </b>
+              <small className="block mt-1 text-[11px] text-[#DCE8E3]/80 truncate">
+                English · اردو · Roman Urdu (Non-diagnostic)
+              </small>
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
                 onClick={() => {
                   setEscalateUrgent(false);
                   setShowEscalateBox((v) => !v);
                 }}
-                className="px-2.5 py-1 rounded-full bg-white/15 hover:bg-white/25 text-[11px] font-bold cursor-pointer"
+                className="px-2.5 py-1 rounded-sm bg-white/10 hover:bg-white/20 text-[11px] font-semibold cursor-pointer"
               >
                 Human Desk
               </button>
               <button
                 type="button"
+                aria-label="Clear chat"
+                title="Clear chat"
+                onClick={handleClearChat}
+                className="p-1.5 rounded-sm hover:bg-white/15 cursor-pointer"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
                 aria-label="Close chat"
                 onClick={() => onToggle(false)}
-                className="p-1.5 rounded-full hover:bg-white/20 cursor-pointer"
+                className="p-1.5 rounded-sm hover:bg-white/15 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
           </div>
 
-          <div ref={listRef} className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#f9fcfc]">
+          <div className="px-4 py-1.5 bg-[#DCE8E3]/55 border-b border-[#D8DFD9] text-[11px] text-[#3B5257] shrink-0">
+            Automated demo assistant — do not share sensitive medical history.
+          </div>
+
+          {availabilityError && (
+            <div
+              role="alert"
+              className="px-4 py-2 bg-[#FBECEC] border-b border-[#E8BABA] text-[11px] font-semibold text-[#A12A2A] shrink-0"
+            >
+              {availabilityError}
+            </div>
+          )}
+
+          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-4 space-y-3 bg-[#F7F5F0]">
             {messages.map((m) => {
               const draft = m.bookingDraft;
               const draftSvc = draft ? services.find((s) => s.id === draft.serviceId) : undefined;
@@ -443,14 +541,14 @@ export function ChatWidget({
               return (
                 <div key={m.id} className="space-y-2">
                   <div
-                    className={`fc-pop max-w-[88%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${
+                    className={`fc-pop max-w-[88%] px-3.5 py-2.5 rounded-lg text-sm leading-relaxed ${
                       m.role === 'user'
-                        ? 'ml-auto bg-[#4d8a96] text-white rounded-br-sm'
-                        : 'mr-auto bg-white border border-[#e3ebec] text-[#12262e] rounded-bl-sm'
+                        ? 'ml-auto bg-[#102E34] text-[#F7F5F0]'
+                        : 'mr-auto bg-white border border-[#D8DFD9] text-[#102E34]'
                     }`}
                   >
                     {m.urgent && (
-                      <div className="flex items-center gap-1.5 text-rose-600 font-extrabold text-xs mb-1">
+                      <div className="flex items-center gap-1.5 text-[#A12A2A] font-bold text-xs mb-1">
                         <AlertTriangle className="w-3.5 h-3.5" />
                         <span>Urgent symptom flagged</span>
                       </div>
@@ -460,14 +558,15 @@ export function ChatWidget({
 
                   {/* Interactive Chat Confirmation Card */}
                   {m.role === 'assistant' && draft && !m.confirmedAppointment && (
-                    <div className="mr-auto max-w-[92%] p-3.5 rounded-2xl bg-[#f2f7f8] border border-[#cfdee1] text-xs space-y-2">
-                      <div className="flex items-center gap-1.5 font-extrabold text-[#12262e]">
-                        <CalendarCheck className="w-4 h-4 text-[#4d8a96]" />
+                    <div className="mr-auto max-w-[94%] p-3.5 rounded-lg bg-white border border-[#426F77] text-xs space-y-2">
+                      <div className="flex items-center gap-1.5 font-bold text-[#102E34]">
+                        <CalendarCheck className="w-4 h-4 text-[#426F77]" />
                         <span>Ready to Submit Appointment Request</span>
                       </div>
-                      <div className="space-y-0.5 text-[#42565c]">
+                      <div className="space-y-0.5 text-[#3B5257] fc-tabular">
                         <p>
-                          <b>{draftSvc?.name || draft.serviceId}</b> ({draftSvc?.priceLabel || ''} ·{' '}
+                          <b className="text-[#102E34]">{draftSvc?.name || draft.serviceId}</b> (
+                          {draftSvc?.priceLabel || ''} ·{' '}
                           {draftSvc?.durationMins || settings.slotDurationMins}m)
                         </p>
                         <p>
@@ -481,17 +580,20 @@ export function ChatWidget({
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           type="button"
-                          disabled={confirmingMsgId === m.id || signingIn}
+                          disabled={
+                            confirmingMsgId === m.id ||
+                            !availabilityVerified ||
+                            Boolean(availabilityError)
+                          }
                           onClick={() => void handleConfirmDraftBooking(m.id, draft)}
-                          className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-full bg-[#4d8a96] text-white font-bold hover:bg-[#3d7280] disabled:opacity-60 cursor-pointer"
+                          className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md bg-[#102E34] text-[#F7F5F0] font-semibold hover:bg-[#194149] disabled:opacity-60 cursor-pointer"
                         >
-                          {!user && <LogIn className="w-3.5 h-3.5" />}
                           <span>
                             {confirmingMsgId === m.id
                               ? 'Reserving…'
-                              : user
-                                ? 'Confirm & Submit Request'
-                                : 'Sign in & Confirm'}
+                              : availabilityError || !availabilityVerified
+                                ? 'Availability Unverified'
+                                : 'Confirm & Submit Request'}
                           </span>
                         </button>
                         <button
@@ -500,7 +602,7 @@ export function ChatWidget({
                             onPrefillBooking(draft.serviceId, draft.doctorId, draft.date);
                             onToggle(false);
                           }}
-                          className="px-3 py-2 rounded-full border border-[#cfdee1] bg-white font-bold text-[#12262e] cursor-pointer"
+                          className="px-3 py-2 rounded-md border border-[#D8DFD9] bg-[#F7F5F0] font-semibold text-[#102E34] cursor-pointer"
                         >
                           Edit
                         </button>
@@ -510,23 +612,28 @@ export function ChatWidget({
 
                   {/* Real Firestore-Confirmed Reference Card */}
                   {m.confirmedAppointment && (
-                    <div className="mr-auto max-w-[92%] p-3.5 rounded-2xl bg-[#eef7f1] border border-[#b9dfc9] text-xs space-y-2 text-[#12262e]">
-                      <div className="flex items-center gap-1.5 font-extrabold text-[#2e8a5c]">
+                    <div className="mr-auto max-w-[94%] p-3.5 rounded-lg bg-[#E6F2EC] border border-[#B8DEC9] text-xs space-y-2 text-[#102E34]">
+                      <div className="flex items-center gap-1.5 font-bold text-[#1E6B4B]">
                         <CheckCircle2 className="w-4 h-4" />
-                        <span>Request {m.confirmedAppointment.referenceCode} Recorded!</span>
+                        <span>Request {m.confirmedAppointment.referenceCode} Recorded</span>
                       </div>
-                      <p className="text-[#42565c]">
+                      <p className="text-[#3B5257] fc-tabular">
                         {m.confirmedAppointment.serviceName} ·{' '}
                         {formatDateLabel(m.confirmedAppointment.date)} at{' '}
                         {formatTimeLabel(m.confirmedAppointment.time)} with{' '}
                         {m.confirmedAppointment.doctorName}. Status: <b>Pending clinic confirmation</b>.
                       </p>
+                      {m.confirmedAppointment.guestSecret && (
+                        <p className="text-[11px] bg-white border border-[#B8DEC9] rounded-sm px-2.5 py-1.5 font-mono break-all select-all">
+                          Tracking code: {m.confirmedAppointment.guestSecret}
+                        </p>
+                      )}
                       <button
                         type="button"
                         onClick={() =>
                           downloadAppointmentIcs(m.confirmedAppointment!, settings.address)
                         }
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white border border-[#b9dfc9] font-bold text-[#2e8a5c] cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-[#B8DEC9] font-semibold text-[#1E6B4B] cursor-pointer"
                       >
                         <Download className="w-3.5 h-3.5" />
                         <span>Add to calendar (.ics)</span>
@@ -545,9 +652,9 @@ export function ChatWidget({
                         );
                         onToggle(false);
                       }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#e7eff1] text-[#3d7280] text-xs font-bold hover:bg-[#d6e6ea] cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#DCE8E3] border border-[#D8DFD9] text-[#102E34] text-xs font-semibold hover:bg-[#cde0d8] cursor-pointer fc-tabular"
                     >
-                      <CalendarPlus className="w-3.5 h-3.5" />
+                      <CalendarPlus className="w-3.5 h-3.5 text-[#426F77]" />
                       <span>
                         Open in Booking Form
                         {m.suggestedDate ? ` (${formatDateLabel(m.suggestedDate)}` : ''}
@@ -564,42 +671,53 @@ export function ChatWidget({
             })}
 
             {sending && (
-              <div className="inline-flex gap-1.5 px-4 py-3 rounded-2xl bg-white border border-[#e3ebec]">
-                <span className="fc-typing-dot w-2 h-2 rounded-full bg-[#9db8be]" />
-                <span className="fc-typing-dot w-2 h-2 rounded-full bg-[#9db8be]" />
-                <span className="fc-typing-dot w-2 h-2 rounded-full bg-[#9db8be]" />
+              <div className="inline-flex gap-1.5 px-4 py-3 rounded-lg bg-white border border-[#D8DFD9]">
+                <span className="fc-typing-dot w-2 h-2 rounded-full bg-[#426F77]" />
+                <span className="fc-typing-dot w-2 h-2 rounded-full bg-[#426F77]" />
+                <span className="fc-typing-dot w-2 h-2 rounded-full bg-[#426F77]" />
               </div>
             )}
 
             {showEscalateBox && (
               <form
                 onSubmit={handleEscalateSubmit}
-                className="p-3 rounded-2xl bg-amber-50 border border-amber-200 space-y-2 text-xs"
+                className="p-3.5 rounded-lg bg-[#FCF4E6] border border-[#E8CFA1] space-y-2 text-xs"
               >
-                <b className="block text-[#12262e]">
+                <b className="block text-[#102E34]">
                   {escalateUrgent
                     ? 'Send urgent callback request to front desk'
-                    : 'Forward this inquiry to our human front desk'}
+                    : 'Forward inquiry to our front desk queue'}
                 </b>
+                <p className="text-[11px] text-[#3B5257]">
+                  Stored for staff review during clinic hours (not 24/7 live staffing).
+                </p>
+                <input
+                  type="text"
+                  value={escalateName}
+                  onChange={(e) => setEscalateName(e.target.value)}
+                  maxLength={80}
+                  placeholder="Your name (optional)"
+                  className="w-full px-3 py-2 rounded-md border border-[#E8CFA1] bg-white text-xs text-[#102E34] focus:outline-none focus:border-[#102E34]"
+                />
                 <input
                   type="text"
                   value={escalateContact}
                   onChange={(e) => setEscalateContact(e.target.value)}
-                  placeholder="Phone / WhatsApp or email"
-                  className="w-full px-3 py-1.5 rounded-lg border border-amber-300 bg-white text-xs"
+                  placeholder="Phone / WhatsApp or email *"
+                  className="w-full px-3 py-2 rounded-md border border-[#E8CFA1] bg-white text-xs text-[#102E34] focus:outline-none focus:border-[#102E34]"
                 />
-                <div className="flex gap-2">
+                <div className="flex gap-2 pt-1">
                   <button
                     type="submit"
                     disabled={escalatingBusy}
-                    className="flex-1 py-1.5 rounded-full bg-[#12262e] text-white font-bold cursor-pointer disabled:opacity-60"
+                    className="flex-1 py-2 rounded-md bg-[#102E34] text-[#F7F5F0] font-semibold cursor-pointer disabled:opacity-60"
                   >
-                    {escalatingBusy ? 'Sending…' : user ? 'Send to front desk' : 'Sign in & send'}
+                    {escalatingBusy ? 'Sending…' : 'Send to front desk'}
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowEscalateBox(false)}
-                    className="px-3 py-1.5 rounded-full border border-amber-300 text-[#42565c] font-semibold cursor-pointer"
+                    className="px-3 py-2 rounded-md border border-[#E8CFA1] bg-white text-[#3B5257] font-semibold cursor-pointer"
                   >
                     Dismiss
                   </button>
@@ -608,17 +726,19 @@ export function ChatWidget({
             )}
           </div>
 
-          <div className="px-3 py-2 border-t border-[#e3ebec] bg-white flex gap-1.5 overflow-x-auto">
-            {['Whitening price?', 'Aaj slots khali hain?', 'آج کون سے اوقات دستیاب ہیں؟'].map((chip) => (
-              <button
-                key={chip}
-                type="button"
-                onClick={() => void sendMessage(chip)}
-                className="px-2.5 py-1 rounded-full bg-[#f2f7f8] text-[#3d7280] text-[11px] font-semibold whitespace-nowrap hover:bg-[#e7eff1] cursor-pointer"
-              >
-                {chip}
-              </button>
-            ))}
+          <div className="px-3 py-2 border-t border-[#D8DFD9] bg-white flex gap-1.5 overflow-x-auto shrink-0">
+            {['Whitening price?', 'Aaj slots khali hain?', 'آج کون سے اوقات دستیاب ہیں؟'].map(
+              (chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => void sendMessage(chip)}
+                  className="px-2.5 py-1 rounded-sm bg-[#F7F5F0] border border-[#D8DFD9] text-[#102E34] text-[11px] font-medium whitespace-nowrap hover:border-[#426F77] cursor-pointer"
+                >
+                  {chip}
+                </button>
+              )
+            )}
           </div>
 
           <form
@@ -626,7 +746,7 @@ export function ChatWidget({
               e.preventDefault();
               void sendMessage(input);
             }}
-            className="p-3 border-t border-[#e3ebec] bg-white flex items-center gap-2"
+            className="p-3 border-t border-[#D8DFD9] bg-white flex items-center gap-2 shrink-0"
           >
             <input
               ref={inputRef}
@@ -635,13 +755,13 @@ export function ChatWidget({
               onChange={(e) => setInput(e.target.value)}
               maxLength={600}
               placeholder="Ask or book in English, Urdu, or Roman Urdu…"
-              className="flex-1 px-3.5 py-2 rounded-full border border-[#cfdee1] text-sm focus:outline-none focus:border-[#4d8a96]"
+              className="flex-1 min-h-[40px] px-3.5 py-2 rounded-md border border-[#D8DFD9] bg-[#F7F5F0]/60 text-sm text-[#102E34] focus:bg-white focus:border-[#102E34]"
             />
             <button
               type="submit"
               disabled={sending || !input.trim()}
               aria-label="Send message"
-              className="w-10 h-10 rounded-full bg-[#4d8a96] text-white flex items-center justify-center hover:bg-[#3d7280] disabled:opacity-50 cursor-pointer shrink-0"
+              className="w-10 h-10 rounded-md bg-[#102E34] text-[#F7F5F0] flex items-center justify-center hover:bg-[#194149] disabled:opacity-45 cursor-pointer shrink-0"
             >
               <Send className="w-4 h-4" />
             </button>

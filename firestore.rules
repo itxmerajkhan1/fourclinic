@@ -25,56 +25,264 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAnonymousAuth() {
+      return isSignedIn() && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    function isEmailUser() {
+      return isSignedIn() && !isAnonymousAuth();
+    }
+
     function isVerifiedUser() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isEmailUser() && request.auth.token.email_verified == true;
     }
 
     function isOwner(uid) {
-      return isVerifiedUser() && request.auth.uid == uid;
+      return isEmailUser() && request.auth.uid == uid;
     }
 
+    // Pre-production note: this bootstrap email acts as an initial verified-admin fallback.
+    // Remove or replace with trusted custom-claim/Admin-SDK provisioning after initial setup.
     function isBootstrapAdmin() {
-      return isVerifiedUser() && request.auth.token.email == 'itxmerajkhan3109@gmail.com';
+      return isVerifiedUser()
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'itxmerajkhan3109@gmail.com';
     }
 
-    function hasUserDoc() {
-      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
     }
 
-    function userRole() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    function userDocHasActiveRole(uDoc, roles) {
+      return uDoc != null && uDoc.data.active == true && uDoc.data.role in roles;
     }
 
-    function userActive() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true;
+    function isDoctorForDoc(uDoc, doctorId) {
+      return uDoc != null && uDoc.data.active == true && uDoc.data.role == 'doctor' && uDoc.data.doctorId == doctorId;
+    }
+
+    function isApptDocOwner(apptDoc) {
+      return apptDoc != null && apptDoc.data.patientUid == request.auth.uid;
     }
 
     function isAdmin() {
-      return isBootstrapAdmin() || (isVerifiedUser() && hasUserDoc() && userActive() && userRole() == 'admin');
+      return isBootstrapAdmin()
+        || (isVerifiedUser() && userDocHasActiveRole(getUserDoc(), ['admin']));
     }
 
     function isReceptionist() {
-      return isVerifiedUser() && hasUserDoc() && userActive() && userRole() == 'receptionist';
+      return isVerifiedUser() && userDocHasActiveRole(getUserDoc(), ['receptionist']);
     }
 
-    function isDoctor() {
-      return isVerifiedUser() && hasUserDoc() && userActive() && userRole() == 'doctor';
+    function isAdminOrReceptionist() {
+      return isBootstrapAdmin()
+        || (isVerifiedUser() && userDocHasActiveRole(getUserDoc(), ['admin', 'receptionist']));
     }
 
     function isDoctorFor(doctorId) {
-      return isDoctor() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.doctorId == doctorId;
+      return isVerifiedUser() && isDoctorForDoc(getUserDoc(), doctorId);
     }
 
     function isStaff() {
-      return isAdmin() || isReceptionist() || isDoctor();
+      return isBootstrapAdmin()
+        || (isVerifiedUser() && userDocHasActiveRole(getUserDoc(), ['admin', 'receptionist', 'doctor']));
     }
 
     function isValidDateStr(s) {
-      return s is string && s.size() == 10 && s.matches('^\\d{4}-\\d{2}-\\d{2}$');
+      return s is string && s.size() == 10 && s.matches('^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$');
     }
 
     function isValidTimeStr(s) {
-      return s is string && s.size() == 5 && s.matches('^\\d{2}:\\d{2}$');
+      return s is string && s.size() == 5 && s.matches('^([01]\\d|2[0-3]):[0-5]\\d$');
+    }
+
+    function isValidSha256Hex(s) {
+      return s is string && s.size() == 64 && s.matches('^[a-f0-9]{64}$');
+    }
+
+    // ==================== TIME, GRID & SCHEDULE HELPERS ====================
+    function timeStrToMins(t) {
+      return (int(t[0:1]) * 10 + int(t[1:2])) * 60 + (int(t[3:4]) * 10 + int(t[4:5]));
+    }
+
+    function twoDigitStr(n) {
+      return n < 10 ? ('0' + string(n)) : string(n);
+    }
+
+    function minsToHhmmConcat(totalMins) {
+      return twoDigitStr(int((totalMins - (totalMins % 60)) / 60)) + twoDigitStr(totalMins % 60);
+    }
+
+    function expectedLockId(doctorId, date, time) {
+      return doctorId + '_' + date + '_' + time[0:2] + time[3:5];
+    }
+
+    function expectedSlotLockAt(doctorId, date, startTime, stepMins, idx) {
+      return doctorId + '_' + date + '_' + minsToHhmmConcat(timeStrToMins(startTime) + idx * stepMins);
+    }
+
+    function apptDateTs(d) {
+      return timestamp.date(
+        int(d[0:1]) * 1000 + int(d[1:2]) * 100 + int(d[2:3]) * 10 + int(d[3:4]),
+        int(d[5:6]) * 10 + int(d[6:7]),
+        int(d[8:9]) * 10 + int(d[9:10])
+      );
+    }
+
+    function apptStartTs(d, t) {
+      return apptDateTs(d) + duration.value(timeStrToMins(t), 'm');
+    }
+
+    function weekdayKeyForDate(d) {
+      return ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][apptDateTs(d).dayOfWeek() - 1];
+    }
+
+    function dayOpenMins(clinicDay, docDay) {
+      return timeStrToMins(clinicDay.start) > timeStrToMins(docDay.start)
+        ? timeStrToMins(clinicDay.start)
+        : timeStrToMins(docDay.start);
+    }
+
+    function dayCloseMins(clinicDay, docDay) {
+      return timeStrToMins(clinicDay.end) < timeStrToMins(docDay.end)
+        ? timeStrToMins(clinicDay.end)
+        : timeStrToMins(docDay.end);
+    }
+
+    function hasLunchBreak(dayMap) {
+      return ('lunchStart' in dayMap)
+        && ('lunchEnd' in dayMap)
+        && isValidTimeStr(dayMap.lunchStart)
+        && isValidTimeStr(dayMap.lunchEnd)
+        && timeStrToMins(dayMap.lunchStart) < timeStrToMins(dayMap.lunchEnd);
+    }
+
+    function effectiveLunchStart(clinicDay, docDay) {
+      return hasLunchBreak(docDay) ? timeStrToMins(docDay.lunchStart) : timeStrToMins(clinicDay.lunchStart);
+    }
+
+    function effectiveLunchEnd(clinicDay, docDay) {
+      return hasLunchBreak(docDay) ? timeStrToMins(docDay.lunchEnd) : timeStrToMins(clinicDay.lunchEnd);
+    }
+
+    function noLunchOverlap(startMins, endMins, clinicDay, docDay) {
+      return (!hasLunchBreak(docDay) && !hasLunchBreak(clinicDay))
+        || endMins <= effectiveLunchStart(clinicDay, docDay)
+        || startMins >= effectiveLunchEnd(clinicDay, docDay);
+    }
+
+    function isDayBookable(data, docData, clinicDay, docDay, stepMins, startMins, endMins) {
+      return clinicDay.enabled == true
+        && docDay.enabled == true
+        && !(data.date in docData.blockedDates)
+        && isValidTimeStr(clinicDay.start) && isValidTimeStr(clinicDay.end)
+        && isValidTimeStr(docDay.start) && isValidTimeStr(docDay.end)
+        && startMins >= dayOpenMins(clinicDay, docDay)
+        && endMins <= dayCloseMins(clinicDay, docDay)
+        && ((startMins - dayOpenMins(clinicDay, docDay)) % stepMins) == 0
+        && noLunchOverlap(startMins, endMins, clinicDay, docDay);
+    }
+
+    function isWithinBookingHorizon(data, cfgData) {
+      return apptStartTs(data.date, data.time) >= request.time - duration.value(14, 'h')
+        && apptStartTs(data.date, data.time) <= request.time + duration.value((cfgData.maxBookingDaysAhead + 1) * 24 + 14, 'h');
+    }
+
+    function hasExactContiguousSlotLocks(data, stepMins) {
+      return data.slotLockIds is list
+        && data.slotLockIds.size() >= 1
+        && data.slotLockIds.size() <= 4
+        && stepMins in [15, 30, 45, 60]
+        && (data.slotLockIds.size() - 1) * stepMins < data.durationMins
+        && data.slotLockIds.size() * stepMins >= data.durationMins
+        && timeStrToMins(data.time) + data.slotLockIds.size() * stepMins <= 1440
+        && data.slotLockIds[0] == data.slotLockId
+        && data.slotLockIds[0] == expectedSlotLockAt(data.doctorId, data.date, data.time, stepMins, 0)
+        && (data.slotLockIds.size() < 2 || data.slotLockIds[1] == expectedSlotLockAt(data.doctorId, data.date, data.time, stepMins, 1))
+        && (data.slotLockIds.size() < 3 || data.slotLockIds[2] == expectedSlotLockAt(data.doctorId, data.date, data.time, stepMins, 2))
+        && (data.slotLockIds.size() < 4 || data.slotLockIds[3] == expectedSlotLockAt(data.doctorId, data.date, data.time, stepMins, 3));
+    }
+
+    function isWithinDoctorAndClinicSchedule(data, docData, cfgData, dayKey) {
+      return (dayKey in cfgData.workingHours)
+        && isWithinBookingHorizon(data, cfgData)
+        && isDayBookable(
+          data,
+          docData,
+          cfgData.workingHours[dayKey],
+          (dayKey in docData.workingHours) ? docData.workingHours[dayKey] : cfgData.workingHours[dayKey],
+          cfgData.slotDurationMins,
+          timeStrToMins(data.time),
+          timeStrToMins(data.time) + data.slotLockIds.size() * cfgData.slotDurationMins
+        );
+    }
+
+    function isValidAppointmentSchedule(data, docData, svcData, cfgData) {
+      return docData.active == true
+        && data.doctorName == docData.name
+        && svcData.active == true
+        && data.serviceName == svcData.name
+        && data.durationMins == svcData.durationMins
+        && data.estimatedValue == svcData.basePrice
+        && hasExactContiguousSlotLocks(data, cfgData.slotDurationMins)
+        && isWithinDoctorAndClinicSchedule(data, docData, cfgData, weekdayKeyForDate(data.date));
+    }
+
+    function slotLockBoundToAppointment(lockId, apptId) {
+      return getAfter(/databases/$(database)/documents/slotLocks/$(lockId)).data.appointmentId == apptId;
+    }
+
+    function allCoveredSlotLocksBoundAfter(data) {
+      return slotLockBoundToAppointment(data.slotLockIds[0], data.id)
+        && (data.slotLockIds.size() < 2 || slotLockBoundToAppointment(data.slotLockIds[1], data.id))
+        && (data.slotLockIds.size() < 3 || slotLockBoundToAppointment(data.slotLockIds[2], data.id))
+        && (data.slotLockIds.size() < 4 || slotLockBoundToAppointment(data.slotLockIds[3], data.id));
+    }
+
+    function slotLockMatchesApptData(apptData, lockData, lockId) {
+      return apptData.status in ['pending', 'confirmed']
+        && apptData.doctorId == lockData.doctorId
+        && apptData.date == lockData.date
+        && lockId in apptData.slotLockIds
+        && (
+          apptData.patientUid == request.auth.uid
+          || isAdminOrReceptionist()
+        );
+    }
+
+    function visitLookupMatchesCreatedAppt(apptData, lookupData, tokenHash) {
+      return apptData.patientUid == lookupData.ownerUid
+        && ('guestTokenHash' in apptData)
+        && apptData.guestTokenHash == tokenHash
+        && apptData.status == lookupData.status
+        && apptData.date == lookupData.date
+        && apptData.time == lookupData.time
+        && apptData.doctorId == lookupData.doctorId
+        && apptData.doctorName == lookupData.doctorName
+        && apptData.serviceName == lookupData.serviceName
+        && apptData.durationMins == lookupData.durationMins
+        && apptData.referenceCode == lookupData.referenceCode;
+    }
+
+    function visitLookupMatchesUpdatedAppt(apptData, lookupData) {
+      return apptData.status == lookupData.status
+        && apptData.date == lookupData.date
+        && apptData.time == lookupData.time
+        && apptData.doctorId == lookupData.doctorId
+        && apptData.doctorName == lookupData.doctorName;
+    }
+
+    function scheduleFieldsChanged(next, prev) {
+      return next.date != prev.date
+        || next.time != prev.time
+        || next.doctorId != prev.doctorId
+        || next.doctorName != prev.doctorName
+        || next.serviceId != prev.serviceId
+        || next.serviceName != prev.serviceName
+        || next.durationMins != prev.durationMins
+        || next.estimatedValue != prev.estimatedValue
+        || next.slotLockId != prev.slotLockId
+        || next.slotLockIds != prev.slotLockIds;
     }
 
     // ==================== VALIDATION BLUEPRINTS ====================
@@ -171,8 +379,15 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function expectedLockId(doctorId, date, time) {
-      return doctorId + '_' + date + '_' + time[0:2] + time[3:5];
+    function isValidBusySlot(data, lockId) {
+      return data.keys().hasAll(['doctorId', 'date', 'time', 'createdAt'])
+        && data.keys().hasOnly(['doctorId', 'date', 'time', 'createdAt'])
+        && isValidId(lockId)
+        && isValidId(data.doctorId)
+        && isValidDateStr(data.date)
+        && isValidTimeStr(data.time)
+        && lockId == expectedLockId(data.doctorId, data.date, data.time)
+        && data.createdAt is timestamp;
     }
 
     function isValidSlotLock(data, lockId) {
@@ -188,6 +403,16 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function hasAllUniqueValidSlotLockIds(data) {
+      return data.slotLockIds is list
+        && data.slotLockIds.size() >= 1
+        && data.slotLockIds.size() <= 4
+        && data.slotLockIds[0] == data.slotLockId
+        && (data.slotLockIds.size() < 2 || (isValidId(data.slotLockIds[1]) && data.slotLockIds[1] != data.slotLockIds[0]))
+        && (data.slotLockIds.size() < 3 || (isValidId(data.slotLockIds[2]) && data.slotLockIds[2] != data.slotLockIds[0] && data.slotLockIds[2] != data.slotLockIds[1]))
+        && (data.slotLockIds.size() < 4 || (isValidId(data.slotLockIds[3]) && data.slotLockIds[3] != data.slotLockIds[0] && data.slotLockIds[3] != data.slotLockIds[1] && data.slotLockIds[3] != data.slotLockIds[2]));
+    }
+
     function isValidAppointment(data, apptId) {
       return data.keys().hasAll([
           'id', 'referenceCode', 'patientUid', 'patientName', 'patientPhone',
@@ -200,7 +425,7 @@ service cloud.firestore {
           'id', 'referenceCode', 'patientUid', 'patientName', 'patientPhone', 'patientEmail',
           'serviceId', 'serviceName', 'doctorId', 'doctorName',
           'date', 'time', 'durationMins', 'estimatedValue', 'status',
-          'source', 'notes', 'staffNotes', 'slotLockId', 'slotLockIds', 'isSample',
+          'source', 'notes', 'staffNotes', 'slotLockId', 'slotLockIds', 'guestTokenHash', 'isSample',
           'createdAt', 'updatedAt'
         ])
         && data.id == apptId && isValidId(data.id)
@@ -223,9 +448,35 @@ service cloud.firestore {
         && data.staffNotes is string && data.staffNotes.size() <= 400
         && isValidId(data.slotLockId)
         && data.slotLockId == expectedLockId(data.doctorId, data.date, data.time)
-        && data.slotLockIds is list && data.slotLockIds.size() >= 1 && data.slotLockIds.size() <= 16
-        && data.slotLockIds[0] == data.slotLockId
+        && hasAllUniqueValidSlotLockIds(data)
+        && (!('guestTokenHash' in data) || isValidSha256Hex(data.guestTokenHash))
         && data.isSample is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVisitLookup(data, tokenHash) {
+      return data.keys().hasAll([
+          'id', 'appointmentId', 'ownerUid', 'referenceCode', 'serviceName',
+          'doctorId', 'doctorName', 'date', 'time', 'durationMins', 'status',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'appointmentId', 'ownerUid', 'referenceCode', 'serviceName',
+          'doctorId', 'doctorName', 'date', 'time', 'durationMins', 'status',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id == tokenHash && isValidSha256Hex(data.id)
+        && isValidId(data.appointmentId)
+        && isValidId(data.ownerUid)
+        && data.referenceCode is string && data.referenceCode.size() >= 4 && data.referenceCode.size() <= 20
+        && data.serviceName is string && data.serviceName.size() >= 2 && data.serviceName.size() <= 80
+        && isValidId(data.doctorId)
+        && data.doctorName is string && data.doctorName.size() >= 2 && data.doctorName.size() <= 80
+        && isValidDateStr(data.date)
+        && isValidTimeStr(data.time)
+        && data.durationMins is int && data.durationMins >= 15 && data.durationMins <= 240
+        && data.status in ['pending', 'confirmed', 'completed', 'cancelled', 'no_show']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -254,12 +505,13 @@ service cloud.firestore {
           'unread', 'messages', 'isSample', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'patientUid', 'channel', 'name', 'contact', 'topic',
+          'id', 'referenceCode', 'patientUid', 'channel', 'name', 'contact', 'topic',
           'status', 'priority', 'assignedToUid', 'assignedToName',
           'estimatedValue', 'internalNotes', 'unread', 'messages',
           'isSample', 'createdAt', 'updatedAt'
         ])
         && data.id == inquiryId && isValidId(data.id)
+        && (!('referenceCode' in data) || (data.referenceCode is string && data.referenceCode.size() >= 4 && data.referenceCode.size() <= 20))
         && isValidId(data.patientUid)
         && data.channel in ['website', 'chatbot', 'whatsapp', 'phone']
         && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
@@ -330,13 +582,14 @@ service cloud.firestore {
       allow list, write: if false;
     }
 
-    // Users & RBAC Roles (Strict PII isolation)
+    // Users & RBAC Roles (Strict PII isolation; anonymous auth excluded; staff/admin require verified email)
     match /users/{userId} {
-      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin() || isReceptionist());
-      allow list: if isAdmin() || isReceptionist();
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdminOrReceptionist());
+      allow list: if isAdminOrReceptionist();
       allow create: if isValidId(userId)
         && isOwner(userId)
         && isValidUser(incoming(), userId)
+        && request.auth.token.email is string
         && incoming().email == request.auth.token.email
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
@@ -406,7 +659,7 @@ service cloud.firestore {
         && incoming().createdByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && (isAdmin() || isReceptionist() || isDoctorFor(incoming().doctorId))
+        && (isAdminOrReceptionist() || isDoctorFor(incoming().doctorId))
         && exists(/databases/$(database)/documents/doctors/$(incoming().doctorId));
       allow update: if isValidId(scheduleId)
         && isValidSchedule(incoming(), scheduleId)
@@ -415,67 +668,115 @@ service cloud.firestore {
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && (isAdmin() || isReceptionist() || isDoctorFor(existing().doctorId));
+        && (isAdminOrReceptionist() || isDoctorFor(existing().doctorId));
       allow delete: if isValidId(scheduleId)
-        && (isAdmin() || isReceptionist() || isDoctorFor(existing().doctorId));
+        && (isAdminOrReceptionist() || isDoctorFor(existing().doctorId));
     }
 
-    // Atomic Non-PII Slot Locks (prevents overlapping doctor bookings)
-    match /slotLocks/{lockId} {
+    // Public Non-PII Occupied Calendar Slots (zero bookedByUid, zero appointmentId, zero PII)
+    match /busySlots/{lockId} {
       allow get: if isValidId(lockId);
       allow list: if true;
       allow create: if isValidId(lockId)
-        && isVerifiedUser()
+        && isSignedIn()
+        && isValidBusySlot(incoming(), lockId)
+        && incoming().createdAt == request.time
+        && existsAfter(/databases/$(database)/documents/slotLocks/$(lockId));
+      allow update: if false;
+      allow delete: if isValidId(lockId)
+        && isSignedIn()
+        && (
+          !existsAfter(/databases/$(database)/documents/slotLocks/$(lockId))
+          || isAdminOrReceptionist()
+          || isDoctorFor(existing().doctorId)
+        );
+    }
+
+    // Private Atomic Slot Locks (owner or verified staff only — no public enumeration)
+    match /slotLocks/{lockId} {
+      allow get: if isValidId(lockId)
+        && isSignedIn()
+        && (
+          resource == null
+          || isStaff()
+          || existing().bookedByUid == request.auth.uid
+        );
+      allow list: if isSignedIn()
+        && (isStaff() || resource.data.bookedByUid == request.auth.uid);
+      allow create: if isValidId(lockId)
+        && isSignedIn()
         && isValidSlotLock(incoming(), lockId)
         && incoming().bookedByUid == request.auth.uid
         && incoming().createdAt == request.time
-        && !exists(/databases/$(database)/documents/slotLocks/$(lockId))
-        && existsAfter(/databases/$(database)/documents/appointments/$(incoming().appointmentId));
+        && slotLockMatchesApptData(
+          getAfter(/databases/$(database)/documents/appointments/$(incoming().appointmentId)).data,
+          incoming(),
+          lockId
+        );
       allow update: if false;
       allow delete: if isValidId(lockId)
-        && isVerifiedUser()
-        && (isAdmin() || isReceptionist() || isDoctorFor(existing().doctorId) || existing().bookedByUid == request.auth.uid);
+        && isSignedIn()
+        && (
+          existing().bookedByUid == request.auth.uid
+          || isAdminOrReceptionist()
+          || isDoctorFor(existing().doctorId)
+          || isApptDocOwner(get(/databases/$(database)/documents/appointments/$(existing().appointmentId)))
+        );
     }
 
-    // Appointments (Strict PII + Ownership + Role Checks)
+    // Appointments (Strict Catalog, Schedule, Duration, Contiguous Locks & Ownership Checks)
     match /appointments/{appointmentId} {
       allow get: if isValidId(appointmentId)
-        && isVerifiedUser()
+        && isSignedIn()
         && (
           existing().patientUid == request.auth.uid
-          || isAdmin()
-          || isReceptionist()
+          || isAdminOrReceptionist()
           || isDoctorFor(existing().doctorId)
         );
-      allow list: if isVerifiedUser() && (
-        isAdmin()
-        || isReceptionist()
-        || (isDoctor() && resource.data.doctorId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.doctorId)
-        || resource.data.patientUid == request.auth.uid
+      allow list: if isSignedIn() && (
+        resource.data.patientUid == request.auth.uid
+        || isAdminOrReceptionist()
+        || isDoctorFor(resource.data.doctorId)
       );
       allow create: if isValidId(appointmentId)
-        && isVerifiedUser()
+        && isSignedIn()
         && isValidAppointment(incoming(), appointmentId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/doctors/$(incoming().doctorId))
-        && exists(/databases/$(database)/documents/services/$(incoming().serviceId))
         && (
           (
             incoming().status in ['pending', 'confirmed']
-            && existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockId))
-            && (incoming().slotLockIds.size() < 2 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[1])))
-            && (incoming().slotLockIds.size() < 3 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[2])))
-            && (incoming().slotLockIds.size() < 4 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[3])))
+            && allCoveredSlotLocksBoundAfter(incoming())
+            && isValidAppointmentSchedule(
+              incoming(),
+              get(/databases/$(database)/documents/doctors/$(incoming().doctorId)).data,
+              get(/databases/$(database)/documents/services/$(incoming().serviceId)).data,
+              get(/databases/$(database)/documents/clinicSettings/main).data
+            )
           )
-          || (isAdmin() && incoming().isSample == true && incoming().status == 'completed')
+          || (
+            isAdmin()
+            && incoming().isSample == true
+            && incoming().status == 'completed'
+            && exists(/databases/$(database)/documents/doctors/$(incoming().doctorId))
+            && exists(/databases/$(database)/documents/services/$(incoming().serviceId))
+          )
         )
         && (
-          (incoming().patientUid == request.auth.uid && incoming().status == 'pending' && incoming().staffNotes == '' && incoming().isSample == false)
-          || ((isAdmin() || isReceptionist()) && incoming().status in ['pending', 'confirmed', 'completed'])
+          (
+            incoming().patientUid == request.auth.uid
+            && incoming().status == 'pending'
+            && incoming().source in ['form', 'chatbot']
+            && incoming().staffNotes == ''
+            && incoming().isSample == false
+          )
+          || (
+            isAdminOrReceptionist()
+            && incoming().status in ['pending', 'confirmed', 'completed']
+          )
         );
       allow update: if isValidId(appointmentId)
-        && isVerifiedUser()
+        && isSignedIn()
         && isValidAppointment(incoming(), appointmentId)
         && incoming().id == existing().id
         && incoming().referenceCode == existing().referenceCode
@@ -485,16 +786,31 @@ service cloud.firestore {
         && (
           !(incoming().status in ['pending', 'confirmed'])
           || (
-            existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockId))
-            && (incoming().slotLockIds.size() < 2 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[1])))
-            && (incoming().slotLockIds.size() < 3 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[2])))
-            && (incoming().slotLockIds.size() < 4 || existsAfter(/databases/$(database)/documents/slotLocks/$(incoming().slotLockIds[3])))
+            allCoveredSlotLocksBoundAfter(incoming())
+            && (
+              !scheduleFieldsChanged(incoming(), existing())
+              || isValidAppointmentSchedule(
+                incoming(),
+                get(/databases/$(database)/documents/doctors/$(incoming().doctorId)).data,
+                get(/databases/$(database)/documents/services/$(incoming().serviceId)).data,
+                get(/databases/$(database)/documents/clinicSettings/main).data
+              )
+            )
           )
         )
         && (
-          // Admin or Receptionist: confirm, reschedule, complete, cancel, no_show, notes
+          // Owning Patient / Anonymous Guest: only non-terminal appointments, can cancel or reschedule (resets to pending)
           (
-            (isAdmin() || isReceptionist())
+            existing().patientUid == request.auth.uid
+            && existing().status in ['pending', 'confirmed']
+            && (
+              (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+              || (incoming().status == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'slotLockId', 'slotLockIds', 'updatedAt']))
+            )
+          )
+          // Admin or Receptionist: confirm, reschedule, complete, cancel, no_show, notes
+          || (
+            isAdminOrReceptionist()
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'doctorId', 'doctorName', 'serviceId', 'serviceName', 'durationMins', 'estimatedValue', 'staffNotes', 'slotLockId', 'slotLockIds', 'updatedAt'])
           )
           // Doctor: only own assigned appointments, transition confirmed -> completed | no_show or update staffNotes
@@ -504,63 +820,133 @@ service cloud.firestore {
             && incoming().status in ['confirmed', 'completed', 'no_show']
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'staffNotes', 'updatedAt'])
           )
-          // Owning Patient: only non-terminal appointments, can cancel or reschedule (resets to pending)
-          || (
-            existing().patientUid == request.auth.uid
-            && existing().status in ['pending', 'confirmed']
-            && (
-              (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
-              || (incoming().status == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'slotLockId', 'slotLockIds', 'updatedAt']))
-            )
-          )
         );
       allow delete: if isValidId(appointmentId) && isAdmin();
     }
 
-    // Minimal Authorized Patient Directory (Staff-only reads)
+    // Non-PII Visit Status Lookup (keyed by 64-hex SHA-256 of non-guessable guest secret; list forbidden)
+    match /visitLookups/{tokenHash} {
+      allow get: if isValidSha256Hex(tokenHash) && isSignedIn();
+      allow list: if false;
+      allow create: if isValidSha256Hex(tokenHash)
+        && isSignedIn()
+        && isValidVisitLookup(incoming(), tokenHash)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && visitLookupMatchesCreatedAppt(
+          getAfter(/databases/$(database)/documents/appointments/$(incoming().appointmentId)).data,
+          incoming(),
+          tokenHash
+        )
+        && (
+          (incoming().ownerUid == request.auth.uid && incoming().status in ['pending', 'confirmed'])
+          || (isAdminOrReceptionist() && incoming().status in ['pending', 'confirmed'])
+        );
+      allow update: if isValidSha256Hex(tokenHash)
+        && isSignedIn()
+        && isValidVisitLookup(incoming(), tokenHash)
+        && incoming().id == existing().id
+        && incoming().appointmentId == existing().appointmentId
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().referenceCode == existing().referenceCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && visitLookupMatchesUpdatedAppt(
+          getAfter(/databases/$(database)/documents/appointments/$(existing().appointmentId)).data,
+          incoming()
+        )
+        && (
+          (
+            existing().ownerUid == request.auth.uid
+            && existing().status in ['pending', 'confirmed']
+            && incoming().status in ['pending', 'cancelled']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'updatedAt'])
+          )
+          || (
+            (isAdminOrReceptionist() || isDoctorFor(existing().doctorId))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'date', 'time', 'doctorId', 'doctorName', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidSha256Hex(tokenHash) && isAdmin();
+    }
+
+    // Minimal Authorized Patient Directory (Staff-only list; own doc readable/updatable during booking tx)
     match /patients/{patientId} {
-      allow get: if isValidId(patientId) && isStaff();
+      allow get: if isValidId(patientId) && (
+        (isSignedIn() && patientId == request.auth.uid)
+        || isStaff()
+      );
       allow list: if isStaff();
       allow create: if isValidId(patientId)
-        && isVerifiedUser()
+        && isSignedIn()
         && isValidPatient(incoming(), patientId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
-          (isAdmin() || isReceptionist())
-          || (patientId == request.auth.uid && incoming().uid == request.auth.uid && incoming().isSample == false)
+          (
+            patientId == request.auth.uid
+            && incoming().uid == request.auth.uid
+            && incoming().totalAppointments == 1
+            && incoming().notes == ''
+            && incoming().isSample == false
+          )
+          || isAdminOrReceptionist()
         );
       allow update: if isValidId(patientId)
-        && isVerifiedUser()
+        && isSignedIn()
         && isValidPatient(incoming(), patientId)
         && incoming().id == existing().id
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          (isAdmin() || isReceptionist())
-          || (patientId == request.auth.uid && existing().uid == request.auth.uid && incoming().uid == existing().uid && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'email', 'preferredDoctorId', 'totalAppointments', 'updatedAt']))
+          (
+            patientId == request.auth.uid
+            && existing().uid == request.auth.uid
+            && incoming().uid == existing().uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'email', 'preferredDoctorId', 'totalAppointments', 'updatedAt'])
+          )
+          || isAdminOrReceptionist()
         );
       allow delete: if isValidId(patientId) && isAdmin();
     }
 
-    // Inquiries & CRM Pipeline
+    // Inquiries & CRM Pipeline (Anonymous guests can create 'new' single-user-message inquiry and read their own)
     match /inquiries/{inquiryId} {
       allow get: if isValidId(inquiryId)
-        && isVerifiedUser()
-        && (isAdmin() || isReceptionist() || existing().patientUid == request.auth.uid);
-      allow list: if isVerifiedUser()
-        && (isAdmin() || isReceptionist() || resource.data.patientUid == request.auth.uid);
+        && isSignedIn()
+        && (existing().patientUid == request.auth.uid || isAdminOrReceptionist());
+      allow list: if isSignedIn()
+        && (resource.data.patientUid == request.auth.uid || isAdminOrReceptionist());
       allow create: if isValidId(inquiryId)
-        && isVerifiedUser()
+        && isSignedIn()
         && isValidInquiry(incoming(), inquiryId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
-          (incoming().patientUid == request.auth.uid && incoming().status == 'new' && incoming().internalNotes == '' && incoming().isSample == false)
-          || (isAdmin() || isReceptionist())
+          (
+            incoming().patientUid == request.auth.uid
+            && incoming().channel in ['website', 'chatbot']
+            && incoming().status == 'new'
+            && incoming().unread == true
+            && incoming().internalNotes == ''
+            && incoming().estimatedValue <= 500
+            && !('assignedToUid' in incoming())
+            && !('assignedToName' in incoming())
+            && incoming().isSample == false
+            && incoming().messages.size() == 1
+            && incoming().messages[0].keys().hasAll(['from', 'text', 'ts'])
+            && incoming().messages[0].keys().hasOnly(['from', 'text', 'ts'])
+            && incoming().messages[0].from == 'user'
+            && incoming().messages[0].text is string
+            && incoming().messages[0].text.size() >= 1
+            && incoming().messages[0].text.size() <= 500
+            && incoming().messages[0].ts is string
+            && incoming().messages[0].ts.size() <= 40
+          )
+          || isAdminOrReceptionist()
         );
       allow update: if isValidId(inquiryId)
-        && (isAdmin() || isReceptionist())
+        && isAdminOrReceptionist()
         && isValidInquiry(incoming(), inquiryId)
         && incoming().id == existing().id
         && incoming().patientUid == existing().patientUid
@@ -587,8 +973,8 @@ service cloud.firestore {
 
     // Immutable Staff Audit Logs
     match /auditLogs/{logId} {
-      allow get: if isValidId(logId) && (isAdmin() || isReceptionist());
-      allow list: if isAdmin() || isReceptionist();
+      allow get: if isValidId(logId) && isAdminOrReceptionist();
+      allow list: if isAdminOrReceptionist();
       allow create: if isValidId(logId)
         && isStaff()
         && isValidAuditLog(incoming(), logId)
